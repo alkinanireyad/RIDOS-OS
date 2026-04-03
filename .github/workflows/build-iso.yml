@@ -1,0 +1,229 @@
+name: Build RIDOS OS ISO
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            debootstrap squashfs-tools xorriso \
+            grub-pc-bin grub-efi-amd64-bin grub2-common \
+            mtools dosfstools gnupg2 curl wget \
+            imagemagick librsvg2-bin
+          echo "Done"
+
+      - name: Bootstrap Debian bookworm
+        run: |
+          curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/debian-bookworm.gpg
+          sudo debootstrap \
+            --arch=amd64 \
+            --variant=minbase \
+            --keyring=/usr/share/keyrings/debian-bookworm.gpg \
+            --include=systemd,systemd-sysv,udev,sudo,locales,bash \
+            bookworm chroot http://deb.debian.org/debian/
+          echo "Bootstrap done"
+
+      - name: Install all packages
+        run: |
+          sudo mount --bind /dev  chroot/dev
+          sudo mount --bind /proc chroot/proc
+          sudo mount --bind /sys  chroot/sys
+          sudo mount --bind /run  chroot/run
+
+          printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\ndeb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\ndeb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
+            | sudo tee chroot/etc/apt/sources.list > /dev/null
+          sudo chroot chroot apt-get update -qq
+
+          sudo chroot chroot apt-get install -y \
+            live-boot live-boot-initramfs-tools \
+            linux-image-amd64 initramfs-tools \
+            grub-pc grub-pc-bin grub2-common grub-common \
+            grub-efi-amd64-bin efibootmgr os-prober \
+            bash-completion tzdata locales
+
+          sudo chroot chroot apt-get install -y \
+            firmware-linux firmware-linux-free firmware-linux-nonfree \
+            firmware-iwlwifi firmware-atheros firmware-realtek \
+            firmware-b43-installer firmware-amd-graphics \
+            firmware-misc-nonfree intel-microcode amd64-microcode \
+            xserver-xorg xserver-xorg-video-all xserver-xorg-input-all \
+            xserver-xorg-video-intel xserver-xorg-video-amdgpu \
+            xserver-xorg-video-nouveau xserver-xorg-video-fbdev \
+            xserver-xorg-video-vesa \
+            alsa-utils pulseaudio pulseaudio-utils \
+            bluez bluetooth cups printer-driver-all \
+            network-manager network-manager-gnome \
+            wpasupplicant wireless-tools usb-modeswitch \
+            pciutils usbutils acpi acpid laptop-detect \
+            ntfs-3g exfat-fuse \
+            --no-install-recommends || true
+
+          sudo chroot chroot apt-get install -y \
+            xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
+            xfce4-power-manager xfce4-notifyd \
+            lightdm lightdm-gtk-greeter \
+            thunar thunar-archive-plugin ristretto mousepad \
+            adwaita-icon-theme papirus-icon-theme \
+            fonts-dejavu fonts-liberation fonts-noto fonts-noto-color-emoji
+
+          sudo chroot chroot apt-get install -y \
+            virtualbox-guest-utils virtualbox-guest-x11 || true
+          sudo chroot chroot apt-get install -y \
+            open-vm-tools open-vm-tools-desktop spice-vdagent || true
+
+          sudo chroot chroot apt-get install -y firefox-esr
+
+          sudo chroot chroot apt-get install -y curl gnupg 2>/dev/null || true
+          sudo chroot chroot bash -c "curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg" || true
+          printf 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main\n' \
+            | sudo tee chroot/etc/apt/sources.list.d/brave-browser.list > /dev/null
+          sudo chroot chroot apt-get update -qq || true
+          sudo chroot chroot apt-get install -y brave-browser && echo "Brave OK" || echo "Brave FAILED"
+
+          sudo chroot chroot apt-get install -y calamares \
+            && echo "Calamares OK" || echo "Calamares FAILED"
+          sudo chroot chroot apt-get install -y \
+            qml-module-qtquick2 qml-module-qtquick-controls2 \
+            qml-module-qtquick-layouts python3-pyqt5 || true
+
+          sudo chroot chroot apt-get install -y \
+            python3 python3-pip python3-venv python3-tk \
+            python3-flask python3-flask-socketio \
+            python3-requests python3-psutil \
+            git vim nano curl wget \
+            nmap net-tools traceroute \
+            openssh-client openssh-server \
+            htop neofetch tree \
+            zip unzip p7zip-full \
+            parted gparted rsync dosfstools \
+            smartmontools hdparm \
+            lshw dmidecode iotop iftop \
+            wireshark-common tshark squashfs-tools
+
+          sudo umount chroot/run  || true
+          sudo umount chroot/sys  || true
+          sudo umount chroot/proc || true
+          sudo umount chroot/dev  || true
+          echo "All packages installed"
+
+      - name: Configure system
+        run: sudo python3 build-system/scripts/configure-system.py
+
+      - name: Configure Calamares
+        run: sudo python3 build-system/scripts/configure-calamares.py
+
+      - name: Copy wallpaper
+        run: |
+          sudo mkdir -p chroot/usr/share/ridos
+          if [ -f "assets/ridos main2.png" ]; then
+            sudo cp "assets/ridos main2.png" chroot/usr/share/ridos/ridos-wallpaper.png
+            echo "Wallpaper copied"
+          else
+            sudo convert -size 1920x1080 gradient:"#0F0A1E-#2D1B69" \
+              -font DejaVu-Sans-Bold -pointsize 100 \
+              -fill "rgba(196,181,253,0.3)" -gravity center \
+              -annotate 0 "RIDOS OS" \
+              chroot/usr/share/ridos/ridos-wallpaper.png 2>/dev/null || true
+            echo "Fallback wallpaper generated"
+          fi
+
+      - name: Apply branding
+        run: sudo python3 build-system/scripts/apply-branding.py
+
+      - name: Install RIDOS core files
+        run: |
+          sudo mkdir -p chroot/opt/ridos/bin chroot/usr/share/ridos
+          sudo cp ridos-core/*.py chroot/opt/ridos/bin/ 2>/dev/null || true
+          sudo cp build-system/scripts/ai_features.py chroot/opt/ridos/bin/ 2>/dev/null || true
+          sudo chmod +x chroot/opt/ridos/bin/*.py 2>/dev/null || true
+          sudo cp build-system/scripts/ridos-grub-install.sh \
+               chroot/usr/local/bin/ridos-grub-install
+          sudo chmod +x chroot/usr/local/bin/ridos-grub-install
+          sudo cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
+               chroot/usr/share/ridos/ 2>/dev/null || true
+          echo "RIDOS files installed"
+
+      - name: Build squashfs
+        run: |
+          sudo mksquashfs chroot filesystem.squashfs \
+            -comp xz -e boot -noappend
+          echo "squashfs: $(du -sh filesystem.squashfs | cut -f1)"
+
+      - name: Prepare ISO structure
+        run: |
+          mkdir -p iso/live iso/boot/grub
+          cp filesystem.squashfs iso/live/
+          KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
+          INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
+          cp "$KERNEL" iso/live/vmlinuz
+          cp "$INITRD" iso/live/initrd
+          python3 build-system/scripts/write-grub-config.py
+          echo "ISO structure ready"
+
+      - name: Build ISO
+        run: |
+          grub-mkimage -O i386-pc -o bios.core.img \
+            -p "/boot/grub" iso9660 linux normal biosdisk search
+          cat /usr/lib/grub/i386-pc/cdboot.img bios.core.img > bios.img
+
+          grub-mkimage -O x86_64-efi -o bootx64.efi \
+            -p "/boot/grub" iso9660 linux normal search
+
+          dd if=/dev/zero of=efi.img bs=1M count=10 status=none
+          mkfs.vfat -F 12 efi.img
+          mmd -i efi.img ::/EFI ::/EFI/boot
+          mcopy -i efi.img bootx64.efi ::/EFI/boot/bootx64.efi
+
+          mkdir -p iso/boot/grub/i386-pc
+          cp /usr/lib/grub/i386-pc/*.mod iso/boot/grub/i386-pc/ 2>/dev/null || true
+          cp /usr/lib/grub/i386-pc/*.lst iso/boot/grub/i386-pc/ 2>/dev/null || true
+          cp bios.img iso/boot/grub/bios.img
+
+          xorriso -as mkisofs \
+            -iso-level 3 \
+            -full-iso9660-filenames \
+            -volid "RIDOS_OS_1.0" \
+            -publisher "RIDOS OS Project" \
+            --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+            -partition_offset 16 \
+            --mbr-force-bootable \
+            -append_partition 2 0xef efi.img \
+            -appended_part_as_gpt \
+            -iso_mbr_part_type 0x00 \
+            -c boot/grub/boot.cat \
+            -b boot/grub/bios.img \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            --grub2-boot-info \
+            -eltorito-alt-boot \
+            -e --interval:appended_partition_2:all:: \
+            -no-emul-boot \
+            -o ridos-os-1.0-Baghdad-x86_64.iso \
+            -graft-points \
+              "/boot/grub/bios.img=bios.img" \
+              "/=iso"
+
+          ls -lh ridos-os-1.0-Baghdad-x86_64.iso
+          echo "ISO ready!"
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: RIDOS-OS-1.0-Baghdad
+          path: ridos-os-1.0-Baghdad-x86_64.iso
+          retention-days: 3
+          compression-level: 0
