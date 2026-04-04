@@ -69,13 +69,13 @@ for f in glob.glob('chroot/home/ridos/Desktop/*.desktop'):
 # Desktop icons
 icons = [
     ('01-control-center.desktop', 'RIDOS Control Center',
-     'xfce4-terminal -e "python3 /opt/ridos/bin/control_center.py"',
+     'bash -c "python3 /opt/ridos/bin/control_center.py"',
      'utilities-system-monitor'),
     ('02-ai-terminal.desktop', 'AI Terminal',
-     'xfce4-terminal -e "python3 /opt/ridos/bin/ai_features.py"',
+     'xfce4-terminal --title=RIDOS-AI-Terminal -e "python3 /opt/ridos/bin/ai_features.py"',
      'utilities-terminal'),
     ('03-ai-shell.desktop', 'RIDOS AI Shell',
-     'xfce4-terminal -e "python3 /opt/ridos/bin/ridos_shell.py"',
+     'xfce4-terminal --title=RIDOS-AI-Shell -e "python3 /opt/ridos/bin/ridos_shell.py"',
      'utilities-terminal'),
     ('04-firefox.desktop', 'Firefox',
      'firefox-esr %u', 'firefox-esr'),
@@ -84,7 +84,7 @@ icons = [
     ('06-files.desktop', 'File Manager',
      'thunar', 'system-file-manager'),
     ('07-install-ridos.desktop', 'Install RIDOS OS',
-     'pkexec /usr/bin/calamares',
+     'bash -c "pkexec /usr/bin/calamares 2>/dev/null || xfce4-terminal -e sudo /usr/bin/calamares"',
      'drive-harddisk'),
 ]
 

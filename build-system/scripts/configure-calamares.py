@@ -126,6 +126,60 @@ unpack:
     sourcefs: "squashfs"
     destination: ""
 ''')
+print("unpackfs: /run/live/medium/live/filesystem.squashfs (confirmed path)")
+
+# Also write a runtime fixer that detects real path
+write('chroot/usr/local/bin/ridos-fix-squashfs', '''#!/bin/bash
+LOG="/tmp/ridos-squashfs.log"
+exec >> "$LOG" 2>&1
+echo "=== Fix squashfs path $(date) ==="
+
+CONF="/etc/calamares/modules/unpackfs.conf"
+
+# Find the squashfs file anywhere on mounted media
+SQ=$(find /run/live /lib/live /cdrom /isodevice /media     -name "filesystem.squashfs" 2>/dev/null | head -1)
+
+echo "Found squashfs: $SQ"
+
+if [ -n "$SQ" ] && [ -f "$SQ" ]; then
+    cat > "$CONF" << CONFEOF
+---
+unpack:
+  - source: "$SQ"
+    sourcefs: "squashfs"
+    destination: ""
+CONFEOF
+    echo "Updated unpackfs.conf with: $SQ"
+else
+    echo "squashfs not found by find - checking mounts"
+    # Find where ISO is mounted
+    MEDIUM=$(findmnt -n -o TARGET -t iso9660 2>/dev/null | head -1)
+    echo "ISO medium: $MEDIUM"
+    if [ -n "$MEDIUM" ] && [ -f "$MEDIUM/live/filesystem.squashfs" ]; then
+        SQ="$MEDIUM/live/filesystem.squashfs"
+        cat > "$CONF" << CONFEOF
+---
+unpack:
+  - source: "$SQ"
+    sourcefs: "squashfs"
+    destination: ""
+CONFEOF
+        echo "Fixed using medium: $SQ"
+    else
+        echo "WARNING: Cannot find squashfs!"
+        echo "All mounts:"
+        findmnt
+        echo "Find results:"
+        find / -name "*.squashfs" 2>/dev/null
+    fi
+fi
+
+cat "$CONF"
+echo "=== Done ==="
+''')
+
+import subprocess
+subprocess.run('chmod +x chroot/usr/local/bin/ridos-fix-squashfs', shell=True)
 
 write('chroot/etc/calamares/modules/displaymanager.conf', '''---
 displaymanagers:
