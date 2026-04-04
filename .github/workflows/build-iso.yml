@@ -111,7 +111,8 @@ jobs:
             parted gparted rsync dosfstools \
             smartmontools hdparm \
             lshw dmidecode iotop iftop \
-            wireshark-common tshark squashfs-tools
+            wireshark-common tshark squashfs-tools \
+            python3-psutil
 
           sudo umount chroot/run  || true
           sudo umount chroot/sys  || true
