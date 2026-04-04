@@ -53,6 +53,7 @@ jobs:
             grub-pc grub-pc-bin grub2-common grub-common \
             grub-efi-amd64-bin efibootmgr os-prober \
             bash-completion tzdata locales
+          echo "grub-pc version: $(chroot chroot dpkg -l grub-pc 2>/dev/null | grep grub-pc | awk "{print \$3}")"
 
           sudo chroot chroot apt-get install -y \
             firmware-linux firmware-linux-free firmware-linux-nonfree \
@@ -161,12 +162,17 @@ jobs:
         run: |
           sudo mksquashfs chroot filesystem.squashfs \
             -comp xz -e boot -noappend
+          sudo chmod 644 filesystem.squashfs
+          sudo chown root:root filesystem.squashfs
           echo "squashfs: $(du -sh filesystem.squashfs | cut -f1)"
+          ls -la filesystem.squashfs
 
       - name: Prepare ISO structure
         run: |
           mkdir -p iso/live iso/boot/grub
-          cp filesystem.squashfs iso/live/
+          sudo cp filesystem.squashfs iso/live/
+          sudo chmod 644 iso/live/filesystem.squashfs
+          sudo chown root:root iso/live/filesystem.squashfs
           KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
           cp "$KERNEL" iso/live/vmlinuz
