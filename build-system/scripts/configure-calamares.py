@@ -36,7 +36,7 @@ sequence:
       - displaymanager
       - packages
       - grubcfg
-      - shellprocess
+      - bootloader
       - finished
 
 branding: ridos
@@ -223,13 +223,19 @@ explicitNMconfig: true
 # CRITICAL: only remove packages - no install (no internet during install)
 write('chroot/etc/calamares/modules/packages.conf', '''---
 backend: apt
-update_db: false
+update_db: true
 operations:
   - remove:
       - live-boot
       - live-boot-initramfs-tools
       - calamares
       - calamares-settings-debian
+  - install:
+      - grub-pc
+      - grub-pc-bin
+      - grub-common
+      - grub2-common
+      - os-prober
 ''')
 
 write('chroot/etc/calamares/modules/grubcfg.conf', '''---
@@ -237,17 +243,16 @@ overwrite: true
 noProxy: false
 ''')
 
-# CRITICAL: shellprocess handles GRUB installation
-write('chroot/etc/calamares/modules/shellprocess.conf', '''---
-dontChroot: true
-timeout: 300
-verbose: true
-
-script:
-  - command: "bash /usr/local/bin/ridos-fix-squashfs"
-    timeout: 30
-  - command: "bash /usr/local/bin/ridos-grub-install"
-    timeout: 300
+# bootloader module handles GRUB directly
+write('chroot/etc/calamares/modules/bootloader.conf', '''---
+efiBootLoader: "grub"
+grubInstall: "grub-install"
+grubMkconfig: "update-grub"
+grubCfg: "/boot/grub/grub.cfg"
+grubProbe: "grub-probe"
+efiInstallerPath: "/usr/bin/efibootmgr"
+installEFIFallback: false
+canBeSkipped: false
 ''')
 
 write('chroot/etc/default/grub',
