@@ -84,8 +84,11 @@ icons = [
     ('06-files.desktop', 'File Manager',
      'thunar', 'system-file-manager'),
     ('07-install-ridos.desktop', 'Install RIDOS OS',
-     'bash -c "pkexec /usr/bin/calamares 2>/dev/null || xfce4-terminal -e sudo /usr/bin/calamares"',
+     'xfce4-terminal --title=RIDOS-Installer -e "sudo bash /usr/local/bin/ridos-install"',
      'drive-harddisk'),
+    ('08-install-gui.desktop', 'Install (Calamares GUI)',
+     'bash -c "pkexec /usr/bin/calamares"',
+     'system-software-install'),
 ]
 
 for fname, name, exec_cmd, icon in icons:

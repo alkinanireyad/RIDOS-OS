@@ -120,13 +120,24 @@ passwordRequirements:
 ''')
 
 # CRITICAL: find squashfs at runtime
-write('chroot/etc/calamares/modules/unpackfs.conf', '''---
+# Use calamares-settings-debian unpackfs (it works!)
+# Only override if needed
+import subprocess
+result = subprocess.run(
+    'chroot chroot dpkg -l calamares-settings-debian 2>/dev/null | grep -q calamares-settings-debian',
+    shell=True)
+if result.returncode == 0:
+    # calamares-settings-debian is installed - use its unpackfs
+    print("Using calamares-settings-debian unpackfs config")
+else:
+    # Write our own
+    write('chroot/etc/calamares/modules/unpackfs.conf', '''---
 unpack:
   - source: "/run/live/medium/live/filesystem.squashfs"
     sourcefs: "squashfs"
     destination: ""
 ''')
-print("unpackfs: /run/live/medium/live/filesystem.squashfs (confirmed path)")
+    print("unpackfs: custom config written")
 
 # Also write a runtime fixer that detects real path
 write('chroot/usr/local/bin/ridos-fix-squashfs', '''#!/bin/bash
@@ -229,13 +240,6 @@ operations:
       - live-boot
       - live-boot-initramfs-tools
       - calamares
-      - calamares-settings-debian
-  - install:
-      - grub-pc
-      - grub-pc-bin
-      - grub-common
-      - grub2-common
-      - os-prober
 ''')
 
 write('chroot/etc/calamares/modules/grubcfg.conf', '''---
