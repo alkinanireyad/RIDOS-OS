@@ -53,6 +53,7 @@ jobs:
             grub-pc grub-pc-bin grub2-common grub-common \
             grub-efi-amd64-bin efibootmgr os-prober \
             bash-completion tzdata locales
+          echo "grub-pc version: $(chroot chroot dpkg -l grub-pc 2>/dev/null | grep grub-pc | awk "{print \$3}")"
 
           sudo chroot chroot apt-get install -y \
             firmware-linux firmware-linux-free firmware-linux-nonfree \
@@ -93,11 +94,12 @@ jobs:
           sudo chroot chroot apt-get update -qq || true
           sudo chroot chroot apt-get install -y brave-browser && echo "Brave OK" || echo "Brave FAILED"
 
-          sudo chroot chroot apt-get install -y calamares \
-            && echo "Calamares OK" || echo "Calamares FAILED"
+          # GTK3 installer dependencies (already in XFCE)
           sudo chroot chroot apt-get install -y \
-            qml-module-qtquick2 qml-module-qtquick-controls2 \
-            qml-module-qtquick-layouts python3-pyqt5 || true
+            python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
+            gir1.2-glib-2.0 parted rsync || true
+          echo "Installer deps OK"
+          # NO Calamares - using ridos-installer.py instead
 
           sudo chroot chroot apt-get install -y \
             python3 python3-pip python3-venv python3-tk \
@@ -111,7 +113,8 @@ jobs:
             parted gparted rsync dosfstools \
             smartmontools hdparm \
             lshw dmidecode iotop iftop \
-            wireshark-common tshark squashfs-tools
+            wireshark-common tshark squashfs-tools \
+            python3-psutil
 
           sudo umount chroot/run  || true
           sudo umount chroot/sys  || true
@@ -122,8 +125,8 @@ jobs:
       - name: Configure system
         run: sudo python3 build-system/scripts/configure-system.py
 
-      - name: Configure Calamares
-        run: sudo python3 build-system/scripts/configure-calamares.py
+      - name: Configure installer
+        run: sudo python3 build-system/scripts/configure-installer.py
 
       - name: Copy wallpaper
         run: |
@@ -147,11 +150,16 @@ jobs:
         run: |
           sudo mkdir -p chroot/opt/ridos/bin chroot/usr/share/ridos
           sudo cp ridos-core/*.py chroot/opt/ridos/bin/ 2>/dev/null || true
+          sudo chmod +x chroot/opt/ridos/bin/ridos-installer.py 2>/dev/null || true
+          sudo ln -sf /opt/ridos/bin/ridos-installer.py chroot/usr/local/bin/ridos-installer 2>/dev/null || true
           sudo cp build-system/scripts/ai_features.py chroot/opt/ridos/bin/ 2>/dev/null || true
           sudo chmod +x chroot/opt/ridos/bin/*.py 2>/dev/null || true
           sudo cp build-system/scripts/ridos-grub-install.sh \
                chroot/usr/local/bin/ridos-grub-install
           sudo chmod +x chroot/usr/local/bin/ridos-grub-install
+          sudo cp build-system/scripts/ridos-install.sh \
+               chroot/usr/local/bin/ridos-install
+          sudo chmod +x chroot/usr/local/bin/ridos-install
           sudo cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
                chroot/usr/share/ridos/ 2>/dev/null || true
           echo "RIDOS files installed"
@@ -160,12 +168,17 @@ jobs:
         run: |
           sudo mksquashfs chroot filesystem.squashfs \
             -comp xz -e boot -noappend
+          sudo chmod 644 filesystem.squashfs
+          sudo chown root:root filesystem.squashfs
           echo "squashfs: $(du -sh filesystem.squashfs | cut -f1)"
+          ls -la filesystem.squashfs
 
       - name: Prepare ISO structure
         run: |
           mkdir -p iso/live iso/boot/grub
-          cp filesystem.squashfs iso/live/
+          sudo cp filesystem.squashfs iso/live/
+          sudo chmod 644 iso/live/filesystem.squashfs
+          sudo chown root:root iso/live/filesystem.squashfs
           KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
           cp "$KERNEL" iso/live/vmlinuz
