@@ -239,12 +239,18 @@ jobs:
           sudo ln -sf /opt/ridos/bin/ai_features.py \
                chroot/usr/local/bin/ridos-ai 2>/dev/null || true
 
-          # debian-flex CLI tool
-          sudo cp build-system/scripts/debian-flex.py \
-               chroot/opt/ridos/bin/debian-flex.py 2>/dev/null || true
-          sudo chmod +x chroot/opt/ridos/bin/debian-flex.py 2>/dev/null || true
-          sudo ln -sf /opt/ridos/bin/debian-flex.py \
-               chroot/usr/local/bin/debian-flex 2>/dev/null || true
+          # debian-flex CLI tool — IT & Comms management
+          if [ -f build-system/scripts/debian-flex.py ]; then
+            sudo cp build-system/scripts/debian-flex.py \
+                 chroot/opt/ridos/bin/debian-flex.py
+            sudo chmod +x chroot/opt/ridos/bin/debian-flex.py
+            sudo ln -sf /opt/ridos/bin/debian-flex.py \
+                 chroot/usr/local/bin/debian-flex
+            echo "debian-flex installed OK"
+          else
+            echo "ERROR: build-system/scripts/debian-flex.py not found!"
+            exit 1
+          fi
 
           # ai_features.py from build scripts
           sudo cp build-system/scripts/ai_features.py \
