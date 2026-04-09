@@ -811,12 +811,13 @@ class RIDOSTool(Gtk.Window):
             self._set_progress(0.25, "Copying files (10-20 min)...")
             self._log("[5/7] Copying RIDOS OS to disk...")
             out, code = run(
-                f"rsync -aAX "
+                f"rsync -aAXH "
                 f"--exclude=/proc --exclude=/sys --exclude=/dev "
-                f"--exclude=/run --exclude=/tmp "
+                f"--exclude=/run --exclude=/tmp --exclude=/mnt "
+                f"--exclude=/media --exclude=/lost+found "
                 f"/mnt/ridos-sq/ {target}/",
                 timeout=1800)
-            run("umount /mnt/ridos-sq && rmdir /mnt/ridos-sq")
+            run("umount /mnt/ridos-sq 2>/dev/null; rmdir /mnt/ridos-sq 2>/dev/null || true")
             if code != 0:
                 raise Exception(f"Copy failed (rsync exit {code}): {out[-300:]}")
             self._log("  Copy complete!")
@@ -975,16 +976,30 @@ class RIDOSTool(Gtk.Window):
 
 
 def main():
+    # Fix DISPLAY for sudo - GTK needs it
+    if 'DISPLAY' not in os.environ:
+        os.environ['DISPLAY'] = ':0'
+    if 'XAUTHORITY' not in os.environ:
+        # Try common locations
+        for xauth in [
+            f"/home/{os.environ.get('SUDO_USER','ridos')}/.Xauthority",
+            "/home/ridos/.Xauthority",
+            "/root/.Xauthority",
+        ]:
+            if os.path.exists(xauth):
+                os.environ['XAUTHORITY'] = xauth
+                break
+
     if os.geteuid() != 0:
-        dialog = Gtk.MessageDialog(
-            flags=0,
-            message_type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.OK,
-            text="Root Required")
-        dialog.format_secondary_text(
-            "Run as root:\nsudo python3 /opt/ridos/bin/ridos-installer.py")
-        dialog.run()
+        # Not root - relaunch with sudo preserving environment
+        env_args = f"DISPLAY={os.environ.get('DISPLAY',':0')} "
+        xauth = os.environ.get('XAUTHORITY','')
+        if xauth:
+            env_args += f"XAUTHORITY={xauth} "
+        os.execvp('sudo', ['sudo', '-E', 'python3',
+                           '/opt/ridos/bin/ridos-installer.py'])
         return
+
     app = RIDOSTool()
     app.show_all()
     Gtk.main()
