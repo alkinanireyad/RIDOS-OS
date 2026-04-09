@@ -26,7 +26,6 @@ write('chroot/home/ridos/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml'
 </channel>
 ''')
 
-# Wallpaper - all monitor names covered
 wp = '/usr/share/ridos/ridos-wallpaper.png'
 write('chroot/home/ridos/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml',
 f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -62,33 +61,41 @@ f'''<?xml version="1.0" encoding="UTF-8"?>
 </channel>
 ''')
 
-# Clean desktop
+# Remove ALL old desktop files first
 for f in glob.glob('chroot/home/ridos/Desktop/*.desktop'):
     os.remove(f)
+    print(f"Removed old: {f}")
 
-# Desktop icons
+# Clean 7 desktop icons
 icons = [
-    ('01-control-center.desktop', 'RIDOS Control Center',
-     'bash -c "python3 /opt/ridos/bin/control_center.py"',
+    ('01-control-center.desktop',
+     'RIDOS Control Center',
+     'bash -c "DISPLAY=:0 sudo python3 /opt/ridos/bin/control_center.py"',
      'utilities-system-monitor'),
-    ('02-ai-terminal.desktop', 'AI Terminal',
-     'xfce4-terminal --title=RIDOS-AI-Terminal -e "python3 /opt/ridos/bin/ai_features.py"',
+    ('02-ai-terminal.desktop',
+     'AI Terminal',
+     'xfce4-terminal --title=RIDOS-AI -e "python3 /opt/ridos/bin/ai_features.py"',
      'utilities-terminal'),
-    ('03-ai-shell.desktop', 'RIDOS AI Shell',
-     'xfce4-terminal --title=RIDOS-AI-Shell -e "python3 /opt/ridos/bin/ridos_shell.py"',
+    ('03-ai-shell.desktop',
+     'RIDOS AI Shell',
+     'xfce4-terminal --title=RIDOS-Shell -e "python3 /opt/ridos/bin/ridos_shell.py"',
      'utilities-terminal'),
-    ('04-firefox.desktop', 'Firefox',
-     'firefox-esr %u', 'firefox-esr'),
-    ('05-brave.desktop', 'Brave Browser',
-     'brave-browser %u', 'brave-browser'),
-    ('06-files.desktop', 'File Manager',
-     'thunar', 'system-file-manager'),
-    ('07-install-ridos.desktop', 'Install RIDOS OS',
-     'xfce4-terminal --title=RIDOS-Installer -e "sudo bash /usr/local/bin/ridos-install"',
+    ('04-firefox.desktop',
+     'Firefox',
+     'firefox-esr %u',
+     'firefox-esr'),
+    ('05-brave.desktop',
+     'Brave Browser',
+     'brave-browser %u',
+     'brave-browser'),
+    ('06-files.desktop',
+     'File Manager',
+     'thunar',
+     'system-file-manager'),
+    ('07-install-ridos.desktop',
+     'Install RIDOS OS',
+     'xfce4-terminal --title=RIDOS-Installer -e "sudo -E python3 /opt/ridos/bin/ridos-installer.py"',
      'drive-harddisk'),
-    ('08-install-gui.desktop', 'Install (Calamares GUI)',
-     'bash -c "pkexec /usr/bin/calamares"',
-     'system-software-install'),
 ]
 
 for fname, name, exec_cmd, icon in icons:
@@ -97,6 +104,7 @@ for fname, name, exec_cmd, icon in icons:
         f'Name={name}\nExec={exec_cmd}\nIcon={icon}\n'
         f'Terminal=false\nCategories=System;\n')
     os.chmod(f'chroot/home/ridos/Desktop/{fname}', 0o755)
+    print(f"Created: {name}")
 
 run('chroot chroot chown -R ridos:ridos /home/ridos 2>/dev/null || true')
-print("Branding applied - 7 desktop icons")
+print("Branding applied - 7 clean desktop icons")
