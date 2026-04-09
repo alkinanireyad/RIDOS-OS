@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 debian-flex — Flexible Debian system management CLI
-Simulated mode | Works without external dependencies
-Run: python3 main.py --help
+For RIDOS OS — IT & Communications Professionals
+Run: debian-flex --help
+     debian-flex init switch --to openrc
+     debian-flex pkg install --compile nginx
+     debian-flex service add --name myapp --cmd "sleep 300"
 """
 import argparse, sys, time, os, json, random
 
