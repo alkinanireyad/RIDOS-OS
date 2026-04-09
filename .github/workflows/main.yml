@@ -1,4 +1,4 @@
-name: Build RIDOS OS ISO
+name: Build RIDOS OS ISO — v1.0 Baghdad
 
 on:
   push:
@@ -14,6 +14,9 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # ─────────────────────────────────────────────────────────
+      # Build tools on the GitHub Actions runner
+      # ─────────────────────────────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -22,8 +25,11 @@ jobs:
             grub-pc-bin grub-efi-amd64-bin grub2-common \
             mtools dosfstools gnupg2 curl wget \
             imagemagick librsvg2-bin
-          echo "Done"
+          echo "Build deps ready"
 
+      # ─────────────────────────────────────────────────────────
+      # Minimal Debian 12 base
+      # ─────────────────────────────────────────────────────────
       - name: Bootstrap Debian bookworm
         run: |
           curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
@@ -36,25 +42,44 @@ jobs:
             bookworm chroot http://deb.debian.org/debian/
           echo "Bootstrap done"
 
-      - name: Install all packages
+      # ─────────────────────────────────────────────────────────
+      # Mount once — unmount after all installs
+      # ─────────────────────────────────────────────────────────
+      - name: Mount chroot filesystems
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
           sudo mount --bind /run  chroot/run
 
-          printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\ndeb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\ndeb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
+      - name: Write APT sources
+        run: |
+          printf \
+            'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\ndeb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\ndeb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
             | sudo tee chroot/etc/apt/sources.list > /dev/null
           sudo chroot chroot apt-get update -qq
+          echo "APT sources ready"
 
+      # ─────────────────────────────────────────────────────────
+      # Core system — kernel, live-boot, GRUB (BIOS only)
+      # grub-pc and grub-efi-amd64-bin can coexist (no conflict)
+      # grub-efi-amd64 (full) conflicts with grub-pc — NOT installed
+      # ─────────────────────────────────────────────────────────
+      - name: Install core system
+        run: |
           sudo chroot chroot apt-get install -y \
             live-boot live-boot-initramfs-tools \
             linux-image-amd64 initramfs-tools \
             grub-pc grub-pc-bin grub2-common grub-common \
             grub-efi-amd64-bin efibootmgr os-prober \
             bash-completion tzdata locales
-          echo "grub-pc version: $(chroot chroot dpkg -l grub-pc 2>/dev/null | grep grub-pc | awk "{print \$3}")"
+          echo "Core system installed"
 
+      # ─────────────────────────────────────────────────────────
+      # Hardware drivers — wide coverage for IT field use
+      # ─────────────────────────────────────────────────────────
+      - name: Install hardware drivers
+        run: |
           sudo chroot chroot apt-get install -y \
             firmware-linux firmware-linux-free firmware-linux-nonfree \
             firmware-iwlwifi firmware-atheros firmware-realtek \
@@ -71,7 +96,13 @@ jobs:
             pciutils usbutils acpi acpid laptop-detect \
             ntfs-3g exfat-fuse \
             --no-install-recommends || true
+          echo "Hardware drivers installed"
 
+      # ─────────────────────────────────────────────────────────
+      # XFCE desktop
+      # ─────────────────────────────────────────────────────────
+      - name: Install XFCE desktop
+        run: |
           sudo chroot chroot apt-get install -y \
             xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
             xfce4-power-manager xfce4-notifyd \
@@ -79,61 +110,104 @@ jobs:
             thunar thunar-archive-plugin ristretto mousepad \
             adwaita-icon-theme papirus-icon-theme \
             fonts-dejavu fonts-liberation fonts-noto fonts-noto-color-emoji
+          echo "XFCE installed"
 
+      # ─────────────────────────────────────────────────────────
+      # Virtualisation guest tools
+      # ─────────────────────────────────────────────────────────
+      - name: Install virtualisation guest tools
+        run: |
           sudo chroot chroot apt-get install -y \
             virtualbox-guest-utils virtualbox-guest-x11 || true
           sudo chroot chroot apt-get install -y \
             open-vm-tools open-vm-tools-desktop spice-vdagent || true
+          sudo chroot chroot systemctl enable spice-vdagentd 2>/dev/null || true
+          echo "Guest tools installed"
 
+      # ─────────────────────────────────────────────────────────
+      # Browsers
+      # ─────────────────────────────────────────────────────────
+      - name: Install browsers
+        run: |
           sudo chroot chroot apt-get install -y firefox-esr
-
-          sudo chroot chroot apt-get install -y curl gnupg 2>/dev/null || true
-          sudo chroot chroot bash -c "curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg" || true
+          sudo chroot chroot bash -c "curl -fsSLo \
+            /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+            https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg" || true
           printf 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main\n' \
             | sudo tee chroot/etc/apt/sources.list.d/brave-browser.list > /dev/null
           sudo chroot chroot apt-get update -qq || true
-          sudo chroot chroot apt-get install -y brave-browser && echo "Brave OK" || echo "Brave FAILED"
+          sudo chroot chroot apt-get install -y brave-browser \
+            && echo "Brave OK" || echo "Brave FAILED — Firefox available"
+          echo "Browsers installed"
 
-          # GTK3 installer dependencies (already in XFCE)
-          sudo chroot chroot apt-get install -y \
-            python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
-            gir1.2-glib-2.0 parted rsync || true
-          echo "Installer deps OK"
-          # NO Calamares - using ridos-installer.py instead
-
+      # ─────────────────────────────────────────────────────────
+      # Python stack + GTK3 (for ridos-installer + debian-flex)
+      # ─────────────────────────────────────────────────────────
+      - name: Install Python and GTK3 stack
+        run: |
           sudo chroot chroot apt-get install -y \
             python3 python3-pip python3-venv python3-tk \
+            python3-gi python3-gi-cairo \
+            gir1.2-gtk-3.0 gir1.2-glib-2.0 \
             python3-flask python3-flask-socketio \
             python3-requests python3-psutil \
-            git vim nano curl wget \
-            nmap net-tools traceroute \
+            python3-rich
+          echo "Python + GTK3 installed"
+
+      # ─────────────────────────────────────────────────────────
+      # Professional IT & Network tools
+      # Target audience: IT engineers, network engineers, comms
+      # ─────────────────────────────────────────────────────────
+      - name: Install Pro IT tools
+        run: |
+          sudo chroot chroot apt-get install -y \
+            nmap net-tools traceroute netcat-openbsd \
             openssh-client openssh-server \
+            wireshark-common tshark tcpdump \
+            iftop iotop nethogs \
+            smartmontools hdparm \
+            lshw dmidecode \
             htop neofetch tree \
+            git vim nano curl wget \
             zip unzip p7zip-full \
             parted gparted rsync dosfstools \
-            smartmontools hdparm \
-            lshw dmidecode iotop iftop \
-            wireshark-common tshark squashfs-tools \
-            python3-psutil
+            squashfs-tools
+          echo "Pro IT tools installed"
 
+      # ─────────────────────────────────────────────────────────
+      # Unmount chroot
+      # ─────────────────────────────────────────────────────────
+      - name: Unmount chroot filesystems
+        run: |
           sudo umount chroot/run  || true
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "All packages installed"
+          echo "Unmounted cleanly"
 
+      # ─────────────────────────────────────────────────────────
+      # System configuration
+      # ─────────────────────────────────────────────────────────
       - name: Configure system
-        run: sudo python3 build-system/scripts/configure-system.py
+        run: |
+          sudo python3 build-system/scripts/configure-system.py
+          echo "System configured"
 
       - name: Configure installer
-        run: sudo python3 build-system/scripts/configure-installer.py
+        run: |
+          sudo python3 build-system/scripts/configure-installer.py
+          echo "Installer configured"
 
+      # ─────────────────────────────────────────────────────────
+      # Wallpaper — uses assets/ridos main2.png if present
+      # ─────────────────────────────────────────────────────────
       - name: Copy wallpaper
         run: |
           sudo mkdir -p chroot/usr/share/ridos
           if [ -f "assets/ridos main2.png" ]; then
-            sudo cp "assets/ridos main2.png" chroot/usr/share/ridos/ridos-wallpaper.png
-            echo "Wallpaper copied"
+            sudo cp "assets/ridos main2.png" \
+              chroot/usr/share/ridos/ridos-wallpaper.png
+            echo "Official wallpaper copied"
           else
             sudo convert -size 1920x1080 gradient:"#0F0A1E-#2D1B69" \
               -font DejaVu-Sans-Bold -pointsize 100 \
@@ -144,26 +218,49 @@ jobs:
           fi
 
       - name: Apply branding
-        run: sudo python3 build-system/scripts/apply-branding.py
+        run: |
+          sudo python3 build-system/scripts/apply-branding.py
+          echo "Branding applied"
 
+      # ─────────────────────────────────────────────────────────
+      # Install all RIDOS core files into chroot
+      # ─────────────────────────────────────────────────────────
       - name: Install RIDOS core files
         run: |
           sudo mkdir -p chroot/opt/ridos/bin chroot/usr/share/ridos
+
+          # Python tools from ridos-core/
           sudo cp ridos-core/*.py chroot/opt/ridos/bin/ 2>/dev/null || true
-          sudo chmod +x chroot/opt/ridos/bin/ridos-installer.py 2>/dev/null || true
-          sudo ln -sf /opt/ridos/bin/ridos-installer.py chroot/usr/local/bin/ridos-installer 2>/dev/null || true
-          sudo cp build-system/scripts/ai_features.py chroot/opt/ridos/bin/ 2>/dev/null || true
           sudo chmod +x chroot/opt/ridos/bin/*.py 2>/dev/null || true
-          sudo cp build-system/scripts/ridos-grub-install.sh \
-               chroot/usr/local/bin/ridos-grub-install
-          sudo chmod +x chroot/usr/local/bin/ridos-grub-install
-          sudo cp build-system/scripts/ridos-install.sh \
-               chroot/usr/local/bin/ridos-install
-          sudo chmod +x chroot/usr/local/bin/ridos-install
+
+          # Symlinks for easy terminal access
+          sudo ln -sf /opt/ridos/bin/ridos-installer.py \
+               chroot/usr/local/bin/ridos-installer 2>/dev/null || true
+          sudo ln -sf /opt/ridos/bin/ai_features.py \
+               chroot/usr/local/bin/ridos-ai 2>/dev/null || true
+
+          # debian-flex CLI tool
+          sudo cp build-system/scripts/debian-flex.py \
+               chroot/opt/ridos/bin/debian-flex.py 2>/dev/null || true
+          sudo chmod +x chroot/opt/ridos/bin/debian-flex.py 2>/dev/null || true
+          sudo ln -sf /opt/ridos/bin/debian-flex.py \
+               chroot/usr/local/bin/debian-flex 2>/dev/null || true
+
+          # ai_features.py from build scripts
+          sudo cp build-system/scripts/ai_features.py \
+               chroot/opt/ridos/bin/ 2>/dev/null || true
+
+          # Legal files
           sudo cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
                chroot/usr/share/ridos/ 2>/dev/null || true
-          echo "RIDOS files installed"
 
+          echo "RIDOS core files installed"
+          echo "Installed tools:"
+          ls chroot/opt/ridos/bin/
+
+      # ─────────────────────────────────────────────────────────
+      # Build squashfs — root:root 644 to avoid rsync error 10
+      # ─────────────────────────────────────────────────────────
       - name: Build squashfs
         run: |
           sudo mksquashfs chroot filesystem.squashfs \
@@ -173,6 +270,9 @@ jobs:
           echo "squashfs: $(du -sh filesystem.squashfs | cut -f1)"
           ls -la filesystem.squashfs
 
+      # ─────────────────────────────────────────────────────────
+      # Assemble ISO directory structure
+      # ─────────────────────────────────────────────────────────
       - name: Prepare ISO structure
         run: |
           mkdir -p iso/live iso/boot/grub
@@ -181,35 +281,46 @@ jobs:
           sudo chown root:root iso/live/filesystem.squashfs
           KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
+          echo "Kernel: $KERNEL"
+          echo "Initrd: $INITRD"
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
           python3 build-system/scripts/write-grub-config.py
           echo "ISO structure ready"
+          ls -lh iso/live/
 
+      # ─────────────────────────────────────────────────────────
+      # Build hybrid ISO (BIOS + UEFI)
+      # ─────────────────────────────────────────────────────────
       - name: Build ISO
         run: |
+          # BIOS boot image
           grub-mkimage -O i386-pc -o bios.core.img \
             -p "/boot/grub" iso9660 linux normal biosdisk search
           cat /usr/lib/grub/i386-pc/cdboot.img bios.core.img > bios.img
 
+          # EFI boot image
           grub-mkimage -O x86_64-efi -o bootx64.efi \
             -p "/boot/grub" iso9660 linux normal search
 
+          # EFI partition image
           dd if=/dev/zero of=efi.img bs=1M count=10 status=none
           mkfs.vfat -F 12 efi.img
           mmd -i efi.img ::/EFI ::/EFI/boot
           mcopy -i efi.img bootx64.efi ::/EFI/boot/bootx64.efi
 
+          # Copy GRUB modules
           mkdir -p iso/boot/grub/i386-pc
           cp /usr/lib/grub/i386-pc/*.mod iso/boot/grub/i386-pc/ 2>/dev/null || true
           cp /usr/lib/grub/i386-pc/*.lst iso/boot/grub/i386-pc/ 2>/dev/null || true
           cp bios.img iso/boot/grub/bios.img
 
+          # Build final hybrid ISO
           xorriso -as mkisofs \
             -iso-level 3 \
             -full-iso9660-filenames \
             -volid "RIDOS_OS_1.0" \
-            -publisher "RIDOS OS Project" \
+            -publisher "RIDOS OS Project — GPL v3" \
             --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
             -partition_offset 16 \
             --mbr-force-bootable \
@@ -231,12 +342,30 @@ jobs:
               "/=iso"
 
           ls -lh ridos-os-1.0-Baghdad-x86_64.iso
+          md5sum ridos-os-1.0-Baghdad-x86_64.iso \
+            > ridos-os-1.0-Baghdad-x86_64.iso.md5
           echo "ISO ready!"
 
-      - name: Upload ISO
+      # ─────────────────────────────────────────────────────────
+      # Upload — retention 3 days to stay within quota
+      # ─────────────────────────────────────────────────────────
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
           name: RIDOS-OS-1.0-Baghdad
-          path: ridos-os-1.0-Baghdad-x86_64.iso
+          path: |
+            ridos-os-1.0-Baghdad-x86_64.iso
+            ridos-os-1.0-Baghdad-x86_64.iso.md5
           retention-days: 3
           compression-level: 0
+
+      - name: Create GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            ridos-os-1.0-Baghdad-x86_64.iso \
+            ridos-os-1.0-Baghdad-x86_64.iso.md5 \
+            --title "RIDOS OS ${{ github.ref_name }} Baghdad" \
+            --notes "RIDOS OS v1.0 Baghdad — AI-Powered Linux for IT Professionals. Login: ridos/ridos. GPL v3."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
