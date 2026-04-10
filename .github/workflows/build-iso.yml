@@ -63,7 +63,7 @@ jobs:
       # ─────────────────────────────────────────────────────────
       # Core system — kernel, live-boot, GRUB (BIOS only)
       # grub-pc and grub-efi-amd64-bin can coexist (no conflict)
-      # grub-efi-amd64 (full) conflicts with grub-pc — NOT installed
+      # NOTE: only grub-efi-amd64-bin is used here (no conflict with grub-pc)
       # ─────────────────────────────────────────────────────────
       - name: Install core system
         run: |
@@ -239,6 +239,9 @@ jobs:
           sudo ln -sf /opt/ridos/bin/ai_features.py \
                chroot/usr/local/bin/ridos-ai 2>/dev/null || true
 
+          # Ensure launcher scripts are executable
+          sudo chmod +x chroot/opt/ridos/bin/launch-control-center.sh 2>/dev/null || true
+          sudo chmod +x chroot/opt/ridos/bin/launch-installer.sh 2>/dev/null || true
           # debian-flex CLI tool — IT & Comms management
           if [ -f build-system/scripts/debian-flex.py ]; then
             sudo cp build-system/scripts/debian-flex.py \
