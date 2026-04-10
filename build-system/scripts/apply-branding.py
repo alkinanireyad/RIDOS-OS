@@ -120,14 +120,17 @@ run('chmod +x chroot/opt/ridos/bin/launch-control-center.sh')
 write('chroot/opt/ridos/bin/launch-installer.sh',
 '#!/bin/bash\n'
 '# RIDOS Installer launcher\n'
-'export DISPLAY=${DISPLAY:-:0}\n'
+'# Set DISPLAY unconditionally\n'
+'export DISPLAY=:0\n'
 '# Find XAUTHORITY\n'
-'for u in $SUDO_USER ridos; do\n'
+'for u in ridos $SUDO_USER $(logname 2>/dev/null); do\n'
 '  if [ -f "/home/$u/.Xauthority" ]; then\n'
 '    export XAUTHORITY="/home/$u/.Xauthority"\n'
 '    break\n'
 '  fi\n'
 'done\n'
+'# Allow root on display\n'
+'xhost +SI:localuser:root 2>/dev/null || true\n'
 'exec python3 /opt/ridos/bin/ridos-installer.py\n')
 run('chmod +x chroot/opt/ridos/bin/launch-installer.sh')
 print("Launcher scripts: OK")
