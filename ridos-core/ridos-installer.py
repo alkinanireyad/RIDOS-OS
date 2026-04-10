@@ -4,10 +4,35 @@ RIDOS OS All-in-One Tool
 Disk Manager + OS Installer in one GTK3 window
 Run: sudo python3 /opt/ridos/bin/ridos-installer.py
 """
+# ── Fix DISPLAY before ANY GTK import ────────────────────────
+# GTK connects to X at import time - DISPLAY must be set first
+import os, subprocess, sys
+
+# Set DISPLAY unconditionally - sudo may strip it
+os.environ.setdefault('DISPLAY', ':0')
+
+# Find and set XAUTHORITY
+sudo_user = os.environ.get('SUDO_USER', 'ridos')
+if not os.environ.get('XAUTHORITY'):
+    for _xauth in [
+        f'/home/{sudo_user}/.Xauthority',
+        '/home/ridos/.Xauthority',
+        '/root/.Xauthority',
+    ]:
+        if os.path.exists(_xauth):
+            os.environ['XAUTHORITY'] = _xauth
+            break
+
+# Allow root to use the display (in case xhost not set)
+subprocess.run(
+    f'xhost +SI:localuser:root',
+    shell=True, capture_output=True)
+
+# ── NOW safe to import GTK ────────────────────────────────────
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib, Pango
-import subprocess, threading, os, json, time, shutil
+import threading, json, time, shutil
 
 # ── Helpers ───────────────────────────────────────────────────
 def run(cmd, timeout=600):
