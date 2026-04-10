@@ -976,33 +976,194 @@ class RIDOSTool(Gtk.Window):
 
 
 def main():
-    # Fix DISPLAY for sudo - GTK needs it
-    if 'DISPLAY' not in os.environ:
+    # ── Step 1: Fix DISPLAY ───────────────────────────────
+    # sudo strips env vars - restore them so GTK can connect to X
+    if not os.environ.get('DISPLAY'):
         os.environ['DISPLAY'] = ':0'
-    if 'XAUTHORITY' not in os.environ:
-        # Try common locations
+
+    # Fix XAUTHORITY for root/sudo
+    sudo_user = os.environ.get('SUDO_USER', 'ridos')
+    if not os.environ.get('XAUTHORITY'):
         for xauth in [
-            f"/home/{os.environ.get('SUDO_USER','ridos')}/.Xauthority",
-            "/home/ridos/.Xauthority",
-            "/root/.Xauthority",
+            f'/home/{sudo_user}/.Xauthority',
+            '/home/ridos/.Xauthority',
+            f'/run/user/1000/gdm/Xauthority',
+            '/root/.Xauthority',
         ]:
             if os.path.exists(xauth):
                 os.environ['XAUTHORITY'] = xauth
                 break
 
+    # ── Step 2: Check root ────────────────────────────────
     if os.geteuid() != 0:
-        # Not root - relaunch with sudo preserving environment
-        env_args = f"DISPLAY={os.environ.get('DISPLAY',':0')} "
-        xauth = os.environ.get('XAUTHORITY','')
-        if xauth:
-            env_args += f"XAUTHORITY={xauth} "
+        # Re-exec with sudo -E (preserves DISPLAY + XAUTHORITY)
         os.execvp('sudo', ['sudo', '-E', 'python3',
-                           '/opt/ridos/bin/ridos-installer.py'])
+                           os.path.abspath(__file__)])
+        return  # never reached
+
+    # ── Step 3: Verify GTK can connect to X ──────────────
+    try:
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk, Gdk
+        # Test X connection
+        display = Gdk.Display.get_default()
+        if display is None:
+            raise RuntimeError("Cannot connect to X display")
+    except Exception as e:
+        # GTK failed - fall back to terminal mode
+        print(f"GTK error: {e}")
+        print("Running in terminal mode...")
+        _terminal_fallback()
         return
 
+    # ── Step 4: Launch GUI ────────────────────────────────
     app = RIDOSTool()
     app.show_all()
     Gtk.main()
+
+
+def _terminal_fallback():
+    import subprocess, json, time, random
+    print("\n=== RIDOS OS Installer (Terminal Mode) ===")
+    print("GTK not available - using text interface\n")
+
+    # Show disks
+    out = subprocess.run('lsblk -d -o NAME,SIZE,MODEL -n',
+        shell=True, capture_output=True, text=True).stdout
+    print("Available disks:")
+    print(out)
+
+    disk = input("Enter disk to install to (e.g. sda): ").strip()
+    if not disk:
+        print("Cancelled"); return
+    disk = f'/dev/{disk}'
+
+    confirm = input(f"ERASE ALL DATA on {disk}? Type YES: ").strip()
+    if confirm != 'YES':
+        print("Cancelled"); return
+
+    username = input("Username [ridos]: ").strip() or 'ridos'
+    password = input("Password [ridos]: ").strip() or 'ridos'
+    hostname = input("Hostname [ridos-os]: ").strip() or 'ridos-os'
+
+    print(f"\nInstalling to {disk}...")
+    print("This will take 10-20 minutes\n")
+
+    # Run actual installation
+    squashfs = None
+    for p in ['/run/live/medium/live/filesystem.squashfs',
+               '/lib/live/mount/medium/live/filesystem.squashfs']:
+        if os.path.exists(p):
+            squashfs = p
+            break
+    if not squashfs:
+        out = subprocess.run(
+            'find /run /lib/live -name filesystem.squashfs 2>/dev/null | head -1',
+            shell=True, capture_output=True, text=True).stdout.strip()
+        squashfs = out if out else None
+
+    if not squashfs:
+        print("ERROR: Cannot find filesystem.squashfs")
+        return
+
+    pfx = disk + 'p' if 'nvme' in disk else disk
+    efi  = pfx + '1'; swap = pfx + '2'; root = pfx + '3'
+    target = '/mnt/ridos-install'
+
+    steps = [
+        f'parted -s {disk} mklabel gpt',
+        f'parted -s {disk} mkpart ESP fat32 1MiB 512MiB',
+        f'parted -s {disk} set 1 esp on',
+        f'parted -s {disk} mkpart primary linux-swap 512MiB 4608MiB',
+        f'parted -s {disk} mkpart primary ext4 4608MiB 100%',
+        'sleep 2',
+        f'mkfs.fat -F32 {efi}',
+        f'mkswap {swap}',
+        f'mkfs.ext4 -F {root}',
+        f'mkdir -p {target}',
+        f'mount {root} {target}',
+        f'mkdir -p {target}/boot/efi',
+        f'mount {efi} {target}/boot/efi',
+        f'chmod 644 {squashfs}',
+        f'mkdir -p /mnt/ridos-sq',
+        f'mount -t squashfs -o loop,ro {squashfs} /mnt/ridos-sq',
+    ]
+    for cmd in steps:
+        print(f"  {cmd.split()[0]}...")
+        ret = subprocess.run(cmd, shell=True)
+        if ret.returncode != 0 and 'sleep' not in cmd:
+            print(f"  WARNING: {cmd}")
+
+    print("  Copying files (please wait)...")
+    ret = subprocess.run(
+        f'rsync -aAXH '
+        f'--exclude=/proc --exclude=/sys --exclude=/dev '
+        f'--exclude=/run --exclude=/tmp --exclude=/mnt '
+        f'--exclude=/media --exclude=/lost+found '
+        f'/mnt/ridos-sq/ {target}/',
+        shell=True, timeout=1800)
+    subprocess.run('umount /mnt/ridos-sq; rmdir /mnt/ridos-sq',
+        shell=True)
+
+    if ret.returncode != 0:
+        print("ERROR: File copy failed")
+        return
+
+    # Configure
+    print("  Configuring system...")
+    for d in ['proc','sys','dev','dev/pts','run','tmp']:
+        subprocess.run(f'mkdir -p {target}/{d}', shell=True)
+
+    ru = subprocess.run(f'blkid -s UUID -o value {root}',
+        shell=True, capture_output=True, text=True).stdout.strip()
+    eu = subprocess.run(f'blkid -s UUID -o value {efi}',
+        shell=True, capture_output=True, text=True).stdout.strip()
+    su = subprocess.run(f'blkid -s UUID -o value {swap}',
+        shell=True, capture_output=True, text=True).stdout.strip()
+
+    with open(f'{target}/etc/fstab', 'w') as f:
+        f.write(f'UUID={ru}  /          ext4  defaults,noatime  0 1\n')
+        f.write(f'UUID={eu}  /boot/efi  vfat  umask=0077        0 2\n')
+        f.write(f'UUID={su}  none       swap  sw                0 0\n')
+
+    with open(f'{target}/etc/hostname', 'w') as f:
+        f.write(hostname + '\n')
+
+    subprocess.run(f'chroot {target} userdel -r {username} 2>/dev/null || true',
+        shell=True)
+    subprocess.run(f'chroot {target} useradd -m -s /bin/bash '
+                   f'-G sudo,audio,video,netdev {username}', shell=True)
+    subprocess.run(f"echo '{username}:{password}' | chroot {target} chpasswd",
+        shell=True)
+    subprocess.run(f"echo 'root:{password}' | chroot {target} chpasswd",
+        shell=True)
+    subprocess.run(
+        f'chroot {target} apt-get remove -y live-boot live-boot-initramfs-tools 2>/dev/null || true',
+        shell=True)
+
+    # Bind mounts for GRUB
+    for d in ['dev', 'dev/pts', 'proc', 'sys']:
+        subprocess.run(f'mount --bind /{d} {target}/{d}', shell=True)
+
+    print("  Installing GRUB...")
+    subprocess.run(
+        f'chroot {target} grub-install --target=i386-pc --recheck --force --no-floppy {disk}',
+        shell=True)
+    subprocess.run(f'chroot {target} update-grub', shell=True)
+
+    for d in ['sys', 'proc', 'dev/pts', 'dev']:
+        subprocess.run(f'umount {target}/{d} 2>/dev/null || true', shell=True)
+    subprocess.run(f'umount {target}/boot/efi 2>/dev/null || true', shell=True)
+    subprocess.run(f'umount {target} 2>/dev/null || true', shell=True)
+
+    print("\n=== RIDOS OS installed successfully! ===")
+    print(f"Username: {username}  Password: {password}")
+    print("Remove USB and reboot!")
+
+    reboot = input("\nReboot now? (yes/no): ").strip()
+    if reboot == 'yes':
+        subprocess.run('reboot', shell=True)
 
 if __name__ == "__main__":
     main()
