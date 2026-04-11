@@ -1,45 +1,59 @@
 #!/usr/bin/env python3
 """
-RIDOS OS All-in-One Tool
-Disk Manager + OS Installer in one GTK3 window
+RIDOS OS Installer - Disk Manager + OS Installer
+Uses Tkinter (proven to work with sudo in XFCE)
 Run: sudo python3 /opt/ridos/bin/ridos-installer.py
 """
-# ── Fix DISPLAY before ANY GTK import ────────────────────────
-# GTK connects to X at import time - DISPLAY must be set first
-import os, subprocess, sys
+# ── Fix DISPLAY before any import ────────────────────────────
+import os, sys, subprocess
 
-# Set DISPLAY unconditionally - sudo may strip it
 os.environ.setdefault('DISPLAY', ':0')
-
-# Find and set XAUTHORITY
-sudo_user = os.environ.get('SUDO_USER', 'ridos')
+_sudo_user = os.environ.get('SUDO_USER', 'ridos')
 if not os.environ.get('XAUTHORITY'):
-    for _xauth in [
-        f'/home/{sudo_user}/.Xauthority',
-        '/home/ridos/.Xauthority',
-        '/root/.Xauthority',
-    ]:
-        if os.path.exists(_xauth):
-            os.environ['XAUTHORITY'] = _xauth
+    for _xa in [f'/home/{_sudo_user}/.Xauthority',
+                '/home/ridos/.Xauthority',
+                '/root/.Xauthority']:
+        if os.path.exists(_xa):
+            os.environ['XAUTHORITY'] = _xa
             break
 
-# Allow root to use the display (in case xhost not set)
-subprocess.run(
-    f'xhost +SI:localuser:root',
-    shell=True, capture_output=True)
+# Allow root to connect to X display
+subprocess.run('xhost +SI:localuser:root 2>/dev/null || true',
+               shell=True, capture_output=True)
 
-# ── NOW safe to import GTK ────────────────────────────────────
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Pango
-import threading, json, time, shutil
+# Re-exec with sudo if not root
+if os.geteuid() != 0:
+    os.execvp('sudo', ['sudo', '-E', 'python3', os.path.abspath(__file__)])
+    sys.exit()
+
+# ── Tkinter import ────────────────────────────────────────────
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, simpledialog
+except ImportError:
+    print("ERROR: python3-tk not installed")
+    print("Run: sudo apt-get install python3-tk")
+    sys.exit(1)
+
+import threading, json, time, shutil, random
+
+# ── Colors ────────────────────────────────────────────────────
+BG     = "#0F0A1E"
+BG2    = "#1E1B4B"
+BG3    = "#2D1B69"
+PURPLE = "#7C3AED"
+TEXT   = "#E9D5FF"
+GREEN  = "#10B981"
+YELLOW = "#F59E0B"
+RED    = "#EF4444"
+CYAN   = "#06B6D4"
+GRAY   = "#6B7280"
 
 # ── Helpers ───────────────────────────────────────────────────
-def run(cmd, timeout=600):
+def run_cmd(cmd, timeout=600):
     try:
-        r = subprocess.run(
-            cmd, shell=True, capture_output=True,
-            text=True, timeout=timeout)
+        r = subprocess.run(cmd, shell=True, capture_output=True,
+                           text=True, timeout=timeout)
         return (r.stdout + r.stderr).strip(), r.returncode
     except subprocess.TimeoutExpired:
         return "Timed out", 1
@@ -47,19 +61,14 @@ def run(cmd, timeout=600):
         return str(e), 1
 
 def get_disks():
-    out, _ = run("lsblk -d -b -o NAME,SIZE,MODEL,TYPE,TRAN -n 2>/dev/null")
+    out, _ = run_cmd("lsblk -d -b -o NAME,SIZE,MODEL,TYPE -n 2>/dev/null")
     disks = []
     for line in out.strip().split('\n'):
-        if not line.strip():
-            continue
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        name, size = parts[0], parts[1]
-        dtype = parts[3] if len(parts) > 3 else ''
-        model = ' '.join(parts[2:3]) if len(parts) > 2 else 'Unknown'
-        if dtype != 'disk' or 'loop' in name:
-            continue
+        if not line.strip(): continue
+        parts = line.split(None, 3)
+        if len(parts) < 4: continue
+        name, size, model, dtype = parts[0], parts[1], parts[2], parts[3]
+        if dtype.strip() != 'disk' or 'loop' in name: continue
         try:
             size_gb = int(size) / 1024**3
         except:
@@ -68,1127 +77,879 @@ def get_disks():
             'name': name,
             'path': f'/dev/{name}',
             'size': f'{size_gb:.1f} GB',
-            'model': model,
+            'model': model.strip() or 'Unknown',
         })
     return disks
 
-def get_partitions(disk):
-    out, _ = run(f"lsblk -b -o NAME,SIZE,FSTYPE,MOUNTPOINT,LABEL -n {disk} 2>/dev/null")
+def get_partitions(disk_path):
+    out, _ = run_cmd(
+        f"lsblk -b -o NAME,SIZE,FSTYPE,MOUNTPOINT -n {disk_path} 2>/dev/null")
     parts = []
+    disk_name = os.path.basename(disk_path)
     for line in out.strip().split('\n'):
-        if not line.strip():
-            continue
-        cols = line.split()
-        name = cols[0].lstrip('|-`')
-        if name == os.path.basename(disk):
-            continue
+        if not line.strip(): continue
+        cols = line.split(None, 3)
+        name = cols[0].lstrip('|-`├└─')
+        if name == disk_name: continue
         size = cols[1] if len(cols) > 1 else '0'
         fstype = cols[2] if len(cols) > 2 else ''
-        mount = cols[3] if len(cols) > 3 else ''
+        mount  = cols[3].strip() if len(cols) > 3 else ''
         try:
             size_gb = int(size) / 1024**3
         except:
             size_gb = 0
         parts.append({
-            'name': name,
-            'path': f'/dev/{name}',
+            'name': name, 'path': f'/dev/{name}',
             'size': f'{size_gb:.1f} GB',
-            'fstype': fstype,
-            'mount': mount,
+            'fstype': fstype, 'mount': mount,
         })
     return parts
 
 def find_squashfs():
     paths = [
-        "/run/live/medium/live/filesystem.squashfs",
-        "/lib/live/mount/medium/live/filesystem.squashfs",
-        "/cdrom/live/filesystem.squashfs",
+        '/run/live/medium/live/filesystem.squashfs',
+        '/lib/live/mount/medium/live/filesystem.squashfs',
+        '/cdrom/live/filesystem.squashfs',
     ]
     for p in paths:
         if os.path.exists(p):
             return p
-    out, _ = run("find /run /lib/live /cdrom /media -name 'filesystem.squashfs' 2>/dev/null | head -1")
+    out, _ = run_cmd(
+        "find /run /lib/live /cdrom /media "
+        "-name 'filesystem.squashfs' 2>/dev/null | head -1")
     return out.strip() if out.strip() else None
 
-# ── CSS ───────────────────────────────────────────────────────
-CSS = b"""
-* { font-family: Arial, sans-serif; }
-window { background-color: #0F0A1E; }
-.sidebar { background-color: #1E1B4B; }
-.topbar { background-color: #1E1B4B; padding: 12px; }
-.page-title { color: #C4B5FD; font-size: 20px; font-weight: bold; }
-.content-area { background-color: #0F0A1E; padding: 16px; }
-.card { background-color: #1E1B4B; border-radius: 8px; padding: 14px; margin: 4px; }
-.disk-row { background-color: #1E1B4B; border-radius: 6px; padding: 10px; margin: 3px; }
-.disk-row:selected { background-color: #4C1D95; }
-.disk-name { color: #C4B5FD; font-size: 15px; font-weight: bold; }
-.disk-info { color: #9CA3AF; font-size: 12px; }
-.part-row { background-color: #111827; border-radius: 4px; padding: 8px; margin: 2px; }
-.btn-primary { background-color: #7C3AED; color: white; font-weight: bold;
-               border-radius: 6px; padding: 8px 20px; border: none; }
-.btn-primary:hover { background-color: #6D28D9; }
-.btn-danger { background-color: #DC2626; color: white; font-weight: bold;
-              border-radius: 6px; padding: 8px 20px; border: none; }
-.btn-danger:hover { background-color: #B91C1C; }
-.btn-success { background-color: #059669; color: white; font-weight: bold;
-               border-radius: 6px; padding: 8px 20px; border: none; }
-.btn-success:hover { background-color: #047857; }
-.btn-flat { background-color: #374151; color: #E9D5FF;
-            border-radius: 6px; padding: 8px 16px; border: none; }
-.btn-flat:hover { background-color: #4B5563; }
-.nav-btn { background-color: transparent; color: #9CA3AF;
-           border-radius: 6px; padding: 10px 16px; border: none;
-           font-size: 13px; text-align: left; }
-.nav-btn:hover { background-color: #2D1B69; color: #E9D5FF; }
-.nav-active { background-color: #4C1D95; color: #E9D5FF; font-weight: bold; }
-.input { background-color: #111827; color: #E9D5FF;
-         border: 1px solid #4C1D95; border-radius: 4px; padding: 7px; }
-.log { background-color: #111827; color: #A5F3FC;
-       font-family: monospace; font-size: 11px;
-       padding: 8px; border-radius: 4px; }
-.progress trough { background-color: #374151; border-radius: 4px; min-height: 10px; }
-.progress progress { background-color: #7C3AED; border-radius: 4px; }
-.status-ok   { color: #10B981; font-weight: bold; }
-.status-warn { color: #F59E0B; font-weight: bold; }
-.status-err  { color: #EF4444; font-weight: bold; }
-label { color: #E9D5FF; }
-"""
 
 # ════════════════════════════════════════════════════════════════
-class RIDOSTool(Gtk.Window):
-    def __init__(self):
-        super().__init__(title="RIDOS OS — Disk Manager & Installer")
-        self.set_default_size(1000, 680)
-        self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_resizable(True)
-        self.connect("delete-event", Gtk.main_quit)
+class RIDOSInstaller:
 
-        # Apply CSS
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(
-            self.get_screen(), provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("RIDOS OS — Disk Manager & Installer")
+        self.root.geometry("980x660")
+        self.root.configure(bg=BG)
+        self.root.resizable(True, True)
 
         self.selected_disk = None
-        self.install_data = {
-            'disk': None,
-            'username': 'ridos',
-            'password': 'ridos',
-            'hostname': 'ridos-os',
-            'timezone': 'Asia/Baghdad',
-            'fullname': 'RIDOS User',
+        self.install_data  = {
+            'disk': None, 'username': 'ridos',
+            'password': 'ridos', 'hostname': 'ridos-os',
+            'timezone': 'Asia/Baghdad', 'fullname': 'RIDOS User',
         }
 
-        self._build_layout()
-        self._nav_to('disks')
+        self._build_ui()
 
-    def _build_layout(self):
-        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        self.add(hbox)
+    # ── Layout ─────────────────────────────────────────────────
+    def _build_ui(self):
+        # Header
+        hdr = tk.Frame(self.root, bg=BG2, pady=10)
+        hdr.pack(fill='x')
+        tk.Label(hdr, text="RIDOS OS",
+                 font=('Arial', 20, 'bold'),
+                 bg=BG2, fg=PURPLE).pack(side='left', padx=16)
+        tk.Label(hdr, text="Disk Manager & Installer v1.0",
+                 font=('Arial', 11),
+                 bg=BG2, fg=TEXT).pack(side='left')
+
+        # Sidebar + Content
+        body = tk.Frame(self.root, bg=BG)
+        body.pack(fill='both', expand=True)
 
         # Sidebar
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        sidebar.get_style_context().add_class('sidebar')
-        sidebar.set_size_request(180, -1)
-        sidebar.set_border_width(8)
+        sidebar = tk.Frame(body, bg=BG2, width=160)
+        sidebar.pack(side='left', fill='y')
+        sidebar.pack_propagate(False)
 
-        logo = Gtk.Label(label="RIDOS OS")
-        logo.get_style_context().add_class('page-title')
-        logo.set_margin_top(12)
-        logo.set_margin_bottom(16)
-        sidebar.pack_start(logo, False, False, 0)
+        tk.Label(sidebar, text="MENU", font=('Arial', 9),
+                 bg=BG2, fg=GRAY).pack(pady=(16, 4))
 
-        self.nav_buttons = {}
-        nav_items = [
-            ('disks',   'Disk Manager'),
-            ('install', 'Install OS'),
-            ('about',   'About'),
-        ]
-        for key, label in nav_items:
-            btn = Gtk.Button(label=label)
-            btn.get_style_context().add_class('nav-btn')
-            btn.connect('clicked', lambda w, k=key: self._nav_to(k))
-            sidebar.pack_start(btn, False, False, 0)
-            self.nav_buttons[key] = btn
+        self._nav_btns = {}
+        for key, label in [('disks',   '  Disk Manager'),
+                            ('install', '  Install OS'),
+                            ('about',   '  About')]:
+            b = tk.Button(sidebar, text=label,
+                          font=('Arial', 11), anchor='w',
+                          bg=BG2, fg=TEXT, relief='flat',
+                          activebackground=BG3,
+                          cursor='hand2',
+                          command=lambda k=key: self._nav(k))
+            b.pack(fill='x', pady=2, padx=4)
+            self._nav_btns[key] = b
 
-        hbox.pack_start(sidebar, False, False, 0)
+        sep = tk.Frame(body, bg='#2D1B69', width=1)
+        sep.pack(side='left', fill='y')
 
-        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-        hbox.pack_start(sep, False, False, 0)
+        # Content frame
+        self.content = tk.Frame(body, bg=BG)
+        self.content.pack(side='left', fill='both', expand=True)
 
-        # Main content
-        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        hbox.pack_start(self.main_box, True, True, 0)
+        self._nav('disks')
 
-    def _nav_to(self, page):
-        for key, btn in self.nav_buttons.items():
-            btn.get_style_context().remove_class('nav-active')
-        self.nav_buttons[page].get_style_context().add_class('nav-active')
-        for child in self.main_box.get_children():
-            self.main_box.remove(child)
-        {
-            'disks':   self._page_disks,
-            'install': self._page_install,
-            'about':   self._page_about,
-        }[page]()
-        self.main_box.show_all()
+    def _nav(self, page):
+        for k, b in self._nav_btns.items():
+            b.config(bg=BG3 if k == page else BG2,
+                     fg=TEXT if k == page else GRAY)
+        for w in self.content.winfo_children():
+            w.destroy()
+        {'disks': self._page_disks,
+         'install': self._page_install,
+         'about': self._page_about}[page]()
 
-    # ══════════════════════════════════════════════════════════
+    # ── Helper widgets ─────────────────────────────────────────
+    def _btn(self, parent, text, cmd, color=PURPLE, fg=TEXT, **kw):
+        return tk.Button(parent, text=text, command=cmd,
+                         bg=color, fg=fg,
+                         font=('Arial', 10, 'bold'),
+                         relief='flat', padx=10, pady=5,
+                         cursor='hand2', **kw)
+
+    def _lbl(self, parent, text, size=10, fg=TEXT, **kw):
+        return tk.Label(parent, text=text,
+                        font=('Arial', size), bg=BG, fg=fg, **kw)
+
+    def _card(self, parent):
+        f = tk.Frame(parent, bg=BG2, padx=10, pady=8)
+        return f
+
+    # ═══════════════════════════════════════════════════════════
     # PAGE: Disk Manager
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     def _page_disks(self):
-        topbar = Gtk.Box(spacing=12)
-        topbar.get_style_context().add_class('topbar')
-        topbar.set_border_width(4)
-        title = Gtk.Label(label="Disk Manager")
-        title.get_style_context().add_class('page-title')
-        topbar.pack_start(title, False, False, 8)
-        refresh_btn = Gtk.Button(label="Refresh")
-        refresh_btn.get_style_context().add_class('btn-flat')
-        refresh_btn.connect('clicked', lambda w: self._reload_disks())
-        topbar.pack_end(refresh_btn, False, False, 4)
-        self.main_box.pack_start(topbar, False, False, 0)
+        # Title bar
+        top = tk.Frame(self.content, bg=BG2, pady=8)
+        top.pack(fill='x')
+        tk.Label(top, text="Disk Manager",
+                 font=('Arial', 15, 'bold'),
+                 bg=BG2, fg=PURPLE).pack(side='left', padx=14)
+        self._btn(top, "Refresh", self._refresh_disks,
+                  BG3).pack(side='right', padx=8)
 
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned.set_border_width(8)
-        paned.set_position(320)
-        self.main_box.pack_start(paned, True, True, 0)
+        pane = tk.Frame(self.content, bg=BG)
+        pane.pack(fill='both', expand=True, padx=8, pady=8)
 
         # Left: disk list
-        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        lbl = Gtk.Label(label="Storage Devices")
-        lbl.set_halign(Gtk.Align.START)
-        left_box.pack_start(lbl, False, False, 0)
+        left = tk.Frame(pane, bg=BG)
+        left.pack(side='left', fill='y', padx=(0, 6))
 
-        scroll_l = Gtk.ScrolledWindow()
-        scroll_l.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.disk_list_box = Gtk.ListBox()
-        self.disk_list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.disk_list_box.connect('row-selected', self._on_disk_selected)
-        scroll_l.add(self.disk_list_box)
-        left_box.pack_start(scroll_l, True, True, 0)
+        tk.Label(left, text="Storage Devices",
+                 font=('Arial', 10, 'bold'),
+                 bg=BG, fg=TEXT).pack(anchor='w')
 
-        # Action buttons
-        btn_box = Gtk.Box(spacing=6)
-        for lbl_txt, fn, cls in [
-            ("Format Disk",   self._format_disk,   'btn-danger'),
-            ("New Part Table",self._new_part_table,'btn-flat'),
-        ]:
-            b = Gtk.Button(label=lbl_txt)
-            b.get_style_context().add_class(cls)
-            b.connect('clicked', fn)
-            btn_box.pack_start(b, True, True, 0)
-        left_box.pack_start(btn_box, False, False, 0)
-        paned.pack1(left_box, True, False)
+        self.disk_listbox = tk.Listbox(
+            left, bg=BG2, fg=TEXT,
+            selectbackground=PURPLE,
+            font=('Courier', 10),
+            relief='flat', width=32, height=14,
+            activestyle='none')
+        self.disk_listbox.pack(fill='both', expand=True, pady=4)
+        self.disk_listbox.bind('<<ListboxSelect>>', self._on_disk_select)
+
+        # Disk action buttons
+        dbtns = tk.Frame(left, bg=BG)
+        dbtns.pack(fill='x')
+        self._btn(dbtns, "New Part Table",
+                  self._new_part_table, BG3).pack(side='left', padx=2)
+        self._btn(dbtns, "Format Disk",
+                  self._format_disk, RED).pack(side='left', padx=2)
 
         # Right: partition details
-        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        lbl2 = Gtk.Label(label="Partitions & Details")
-        lbl2.set_halign(Gtk.Align.START)
-        right_box.pack_start(lbl2, False, False, 0)
+        right = tk.Frame(pane, bg=BG)
+        right.pack(side='left', fill='both', expand=True)
 
-        scroll_r = Gtk.ScrolledWindow()
-        scroll_r.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.part_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        scroll_r.add(self.part_box)
-        right_box.pack_start(scroll_r, True, True, 0)
+        tk.Label(right, text="Partitions",
+                 font=('Arial', 10, 'bold'),
+                 bg=BG, fg=TEXT).pack(anchor='w')
 
-        # Partition actions
-        part_btn_box = Gtk.Box(spacing=6)
-        for lbl_txt, fn, cls in [
-            ("Create EXT4",  self._create_ext4,  'btn-primary'),
-            ("Delete Part",  self._delete_part,  'btn-danger'),
-            ("Mount/Unmount",self._toggle_mount,  'btn-flat'),
-        ]:
-            b = Gtk.Button(label=lbl_txt)
-            b.get_style_context().add_class(cls)
-            b.connect('clicked', fn)
-            part_btn_box.pack_start(b, True, True, 0)
-        right_box.pack_start(part_btn_box, False, False, 0)
-        paned.pack2(right_box, True, False)
+        # Partition table
+        cols = ('Device', 'Size', 'FS Type', 'Mount')
+        self.part_tree = ttk.Treeview(
+            right, columns=cols,
+            show='headings', height=10)
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure('Treeview',
+                        background=BG2, foreground=TEXT,
+                        fieldbackground=BG2, rowheight=24)
+        style.configure('Treeview.Heading',
+                        background=BG3, foreground=CYAN,
+                        font=('Arial', 9, 'bold'))
+        style.map('Treeview',
+                  background=[('selected', PURPLE)])
+        for col, w in zip(cols, [120, 80, 90, 140]):
+            self.part_tree.heading(col, text=col)
+            self.part_tree.column(col, width=w, anchor='w')
+        self.part_tree.pack(fill='both', expand=True, pady=4)
+
+        # Partition action buttons
+        pbtns = tk.Frame(right, bg=BG)
+        pbtns.pack(fill='x')
+        self._btn(pbtns, "Create EXT4",
+                  self._create_ext4, PURPLE).pack(side='left', padx=2)
+        self._btn(pbtns, "Delete Last",
+                  self._delete_part, RED).pack(side='left', padx=2)
+        self._btn(pbtns, "Mount/Unmount",
+                  self._toggle_mount, BG3).pack(side='left', padx=2)
 
         # Status bar
-        self.disk_status = Gtk.Label(label="Select a disk to view details")
-        self.disk_status.set_halign(Gtk.Align.START)
-        self.disk_status.get_style_context().add_class('disk-info')
-        self.main_box.pack_start(self.disk_status, False, False, 6)
+        self.disk_status = tk.Label(
+            self.content, text="Select a disk",
+            font=('Arial', 9), bg=BG2, fg=GRAY,
+            anchor='w', pady=4)
+        self.disk_status.pack(fill='x', padx=8, pady=(0, 4))
 
-        self._reload_disks()
+        self._refresh_disks()
 
-    def _reload_disks(self):
-        for child in self.disk_list_box.get_children():
-            self.disk_list_box.remove(child)
-
-        disks = get_disks()
-        if not disks:
-            row = Gtk.ListBoxRow()
-            lbl = Gtk.Label(label="No disks found")
-            row.add(lbl)
-            self.disk_list_box.add(row)
-        else:
-            for d in disks:
-                row = Gtk.ListBoxRow()
-                row.disk_data = d
-                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-                box.set_border_width(8)
-                name_lbl = Gtk.Label(label=f"/dev/{d['name']}  {d['size']}")
-                name_lbl.get_style_context().add_class('disk-name')
-                name_lbl.set_halign(Gtk.Align.START)
-                model_lbl = Gtk.Label(label=d['model'])
-                model_lbl.get_style_context().add_class('disk-info')
-                model_lbl.set_halign(Gtk.Align.START)
-                box.pack_start(name_lbl, False, False, 0)
-                box.pack_start(model_lbl, False, False, 0)
-                row.add(box)
-                self.disk_list_box.add(row)
-
-        self.disk_list_box.show_all()
-
-    def _on_disk_selected(self, listbox, row):
-        if row is None:
+    def _refresh_disks(self):
+        self._disks = get_disks()
+        self.disk_listbox.delete(0, 'end')
+        if not self._disks:
+            self.disk_listbox.insert('end', '  No disks found')
             return
-        self.selected_disk = row.disk_data
-        self.install_data['disk'] = row.disk_data['path']
-        self._reload_partitions()
+        for d in self._disks:
+            self.disk_listbox.insert(
+                'end',
+                f"  /dev/{d['name']}  {d['size']:>8}  {d['model'][:14]}")
 
-    def _reload_partitions(self):
-        for child in self.part_box.get_children():
-            self.part_box.remove(child)
+    def _on_disk_select(self, event):
+        sel = self.disk_listbox.curselection()
+        if not sel: return
+        idx = sel[0]
+        if idx >= len(self._disks): return
+        self.selected_disk = self._disks[idx]
+        self.install_data['disk'] = self.selected_disk['path']
+        self.disk_status.config(
+            text=f"  {self.selected_disk['path']}  "
+                 f"{self.selected_disk['size']}  "
+                 f"{self.selected_disk['model']}")
+        self._refresh_parts()
 
-        if not self.selected_disk:
-            return
-
-        disk_path = self.selected_disk['path']
-        self.disk_status.set_text(
-            f"Disk: {disk_path}  Size: {self.selected_disk['size']}  Model: {self.selected_disk['model']}")
-
-        parts = get_partitions(disk_path)
-
-        # Disk info header
-        out, _ = run(f"parted -s {disk_path} print 2>/dev/null | head -8")
-        info_lbl = Gtk.Label(label=out)
-        info_lbl.get_style_context().add_class('log')
-        info_lbl.set_halign(Gtk.Align.START)
-        info_lbl.set_xalign(0)
-        self.part_box.pack_start(info_lbl, False, False, 0)
-
+    def _refresh_parts(self):
+        for row in self.part_tree.get_children():
+            self.part_tree.delete(row)
+        if not self.selected_disk: return
+        parts = get_partitions(self.selected_disk['path'])
         if not parts:
-            lbl = Gtk.Label(label="No partitions found")
-            lbl.get_style_context().add_class('status-warn')
-            self.part_box.pack_start(lbl, False, False, 0)
-        else:
-            for p in parts:
-                row_box = Gtk.Box(spacing=12)
-                row_box.get_style_context().add_class('part-row')
-                row_box.set_border_width(6)
-                name = Gtk.Label(label=f"/dev/{p['name']}")
-                name.get_style_context().add_class('disk-name')
-                name.set_width_chars(14)
-                size = Gtk.Label(label=p['size'])
-                size.get_style_context().add_class('disk-info')
-                size.set_width_chars(10)
-                fs = Gtk.Label(label=p['fstype'] or 'unknown')
-                fs.get_style_context().add_class('disk-info')
-                fs.set_width_chars(10)
-                mount = Gtk.Label(label=p['mount'] or 'not mounted')
-                mount.get_style_context().add_class('disk-info')
-                row_box.pack_start(name, False, False, 0)
-                row_box.pack_start(size, False, False, 0)
-                row_box.pack_start(fs, False, False, 0)
-                row_box.pack_start(mount, False, False, 0)
-                self.part_box.pack_start(row_box, False, False, 0)
-
-        self.part_box.show_all()
-
-    def _format_disk(self, widget):
-        if not self.selected_disk:
-            self._msg("Select a disk first!", "warning")
+            self.part_tree.insert('', 'end',
+                values=('No partitions', '', '', ''))
             return
+        for p in parts:
+            self.part_tree.insert('', 'end', values=(
+                f"/dev/{p['name']}", p['size'],
+                p['fstype'] or '-', p['mount'] or '-'))
+
+    def _new_part_table(self):
+        if not self.selected_disk:
+            messagebox.showwarning("", "Select a disk first"); return
         disk = self.selected_disk['path']
-        confirmed = self._confirm(
-            "Format Disk",
-            f"This will ERASE ALL DATA on {disk}!\n\nAre you sure?")
-        if not confirmed:
+        if not messagebox.askyesno("Confirm",
+                f"Create new GPT table on {disk}?\n"
+                "This erases all partitions!"):
             return
-        self._run_with_log(
-            "Formatting disk...",
-            [f"parted -s {disk} mklabel gpt",
-             f"mkfs.ext4 -F {disk}",
-             "sleep 1"],
-            lambda: self._reload_partitions())
+        out, code = run_cmd(f"parted -s {disk} mklabel gpt")
+        messagebox.showinfo("Done",
+            f"GPT table created on {disk}" if code == 0
+            else f"Failed:\n{out}")
+        self._refresh_parts()
 
-    def _new_part_table(self, widget):
+    def _format_disk(self):
         if not self.selected_disk:
-            self._msg("Select a disk first!", "warning")
-            return
+            messagebox.showwarning("", "Select a disk first"); return
         disk = self.selected_disk['path']
-        confirmed = self._confirm(
-            "New Partition Table",
-            f"Create new GPT partition table on {disk}?\nThis will erase all partitions!")
-        if not confirmed:
+        if not messagebox.askyesno("⚠ WARNING",
+                f"ERASE ALL DATA on {disk}?\n"
+                "This cannot be undone!"):
             return
-        out, code = run(f"parted -s {disk} mklabel gpt")
-        self._msg(
-            f"Partition table created on {disk}" if code == 0 else f"Failed: {out}",
-            "ok" if code == 0 else "error")
-        self._reload_partitions()
+        out, code = run_cmd(
+            f"parted -s {disk} mklabel gpt && "
+            f"mkfs.ext4 -F {disk}")
+        messagebox.showinfo("Done",
+            "Disk formatted" if code == 0 else f"Failed:\n{out}")
+        self._refresh_parts()
 
-    def _create_ext4(self, widget):
+    def _create_ext4(self):
         if not self.selected_disk:
-            self._msg("Select a disk first!", "warning")
-            return
+            messagebox.showwarning("", "Select a disk first"); return
         disk = self.selected_disk['path']
-        out, _ = run(f"parted -s {disk} print free 2>/dev/null")
-        self._run_with_log(
-            "Creating EXT4 partition...",
-            [f"parted -s {disk} mkpart primary ext4 0% 100%",
-             f"partprobe {disk}",
-             "sleep 1",
-             f"mkfs.ext4 -F {disk}1 2>/dev/null || true"],
-            lambda: self._reload_partitions())
+        cmds = [
+            f"parted -s {disk} mkpart primary ext4 0% 100%",
+            f"partprobe {disk}", "sleep 1",
+            f"mkfs.ext4 -F {disk}1 2>/dev/null || "
+            f"mkfs.ext4 -F {disk}p1 2>/dev/null || true",
+        ]
+        for cmd in cmds:
+            run_cmd(cmd)
+        messagebox.showinfo("Done", "EXT4 partition created")
+        self._refresh_parts()
 
-    def _delete_part(self, widget):
+    def _delete_part(self):
         if not self.selected_disk:
-            self._msg("Select a disk first!", "warning")
-            return
+            messagebox.showwarning("", "Select a disk first"); return
         disk = self.selected_disk['path']
         parts = get_partitions(disk)
         if not parts:
-            self._msg("No partitions to delete!", "warning")
+            messagebox.showinfo("", "No partitions to delete"); return
+        if not messagebox.askyesno("Confirm",
+                f"Delete last partition on {disk}?"):
             return
-        confirmed = self._confirm(
-            "Delete Last Partition",
-            f"Delete the last partition on {disk}?")
-        if not confirmed:
-            return
-        num = len(parts)
-        out, code = run(f"parted -s {disk} rm {num}")
-        self._msg(
-            f"Partition {num} deleted" if code == 0 else f"Failed: {out}",
-            "ok" if code == 0 else "error")
-        self._reload_partitions()
+        out, code = run_cmd(f"parted -s {disk} rm {len(parts)}")
+        messagebox.showinfo("Done",
+            "Partition deleted" if code == 0 else f"Failed:\n{out}")
+        self._refresh_parts()
 
-    def _toggle_mount(self, widget):
+    def _toggle_mount(self):
         if not self.selected_disk:
-            self._msg("Select a disk first!", "warning")
-            return
+            messagebox.showwarning("", "Select a disk first"); return
         parts = get_partitions(self.selected_disk['path'])
         mounted = [p for p in parts if p['mount']]
         if mounted:
             for p in mounted:
-                run(f"umount {p['path']} 2>/dev/null || true")
-            self._msg("Partitions unmounted", "ok")
+                run_cmd(f"umount {p['path']} 2>/dev/null || true")
+            messagebox.showinfo("Done", "Partitions unmounted")
         else:
             for p in parts:
                 if p['fstype'] and p['fstype'] != 'swap':
                     mnt = f"/mnt/{p['name']}"
-                    run(f"mkdir -p {mnt}")
-                    run(f"mount {p['path']} {mnt} 2>/dev/null || true")
-            self._msg("Partitions mounted to /mnt/", "ok")
-        self._reload_partitions()
+                    run_cmd(f"mkdir -p {mnt} && "
+                            f"mount {p['path']} {mnt} 2>/dev/null || true")
+            messagebox.showinfo("Done", "Partitions mounted to /mnt/")
+        self._refresh_parts()
 
-    # ══════════════════════════════════════════════════════════
-    # PAGE: Install OS
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # PAGE: Install OS — 4-step wizard
+    # ═══════════════════════════════════════════════════════════
     def _page_install(self):
-        topbar = Gtk.Box()
-        topbar.get_style_context().add_class('topbar')
-        topbar.set_border_width(4)
-        title = Gtk.Label(label="Install RIDOS OS")
-        title.get_style_context().add_class('page-title')
-        topbar.pack_start(title, False, False, 8)
-        self.main_box.pack_start(topbar, False, False, 0)
+        self._install_step = 0
 
-        # Notebook for install steps
-        self.notebook = Gtk.Notebook()
-        self.notebook.set_show_tabs(False)
-        self.notebook.set_border_width(8)
-        self.main_box.pack_start(self.notebook, True, True, 0)
+        top = tk.Frame(self.content, bg=BG2, pady=8)
+        top.pack(fill='x')
+        self._step_label = tk.Label(
+            top, text="Step 1 of 4: Select Disk",
+            font=('Arial', 14, 'bold'),
+            bg=BG2, fg=PURPLE)
+        self._step_label.pack(side='left', padx=14)
 
-        pages = [
-            ("Disk",     self._install_page_disk()),
-            ("User",     self._install_page_user()),
-            ("Settings", self._install_page_settings()),
-            ("Confirm",  self._install_page_confirm()),
-            ("Progress", self._install_page_progress()),
-            ("Done",     self._install_page_done()),
-        ]
-        for name, page in pages:
-            lbl = Gtk.Label(label=name)
-            self.notebook.append_page(page, lbl)
+        # Step indicator
+        self._step_bar = tk.Frame(self.content, bg=BG, pady=4)
+        self._step_bar.pack(fill='x', padx=10)
+        self._step_indicators = []
+        for i, name in enumerate(['Disk', 'User', 'Settings', 'Confirm']):
+            f = tk.Frame(self._step_bar, bg=BG)
+            f.pack(side='left', expand=True, fill='x')
+            c = tk.Label(f, text=f"{i+1}. {name}",
+                         font=('Arial', 9),
+                         bg=BG, fg=GRAY)
+            c.pack()
+            self._step_indicators.append(c)
 
-        # Nav buttons
-        nav = Gtk.Box(spacing=8)
-        nav.set_border_width(10)
-        self.install_back_btn = Gtk.Button(label="Back")
-        self.install_back_btn.get_style_context().add_class('btn-flat')
-        self.install_back_btn.connect('clicked', self._install_back)
-        self.install_next_btn = Gtk.Button(label="Next")
-        self.install_next_btn.get_style_context().add_class('btn-primary')
-        self.install_next_btn.connect('clicked', self._install_next)
-        self.install_step_lbl = Gtk.Label(label="Step 1 of 4")
-        self.install_step_lbl.get_style_context().add_class('disk-info')
-        nav.pack_start(self.install_back_btn, False, False, 0)
-        nav.pack_start(self.install_step_lbl, True, True, 0)
-        nav.pack_end(self.install_next_btn, False, False, 0)
-        self.main_box.pack_start(nav, False, False, 0)
-        self._update_install_nav()
+        tk.Frame(self.content, bg=BG2, height=1).pack(fill='x')
 
-    def _install_page_disk(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_border_width(16)
-        lbl = Gtk.Label(label="Select Target Disk")
-        lbl.get_style_context().add_class('page-title')
-        lbl.set_halign(Gtk.Align.START)
-        box.pack_start(lbl, False, False, 0)
+        # Wizard pages frame
+        self._wizard_frame = tk.Frame(self.content, bg=BG)
+        self._wizard_frame.pack(fill='both', expand=True,
+                                padx=16, pady=8)
 
-        warn = Gtk.Label()
-        warn.set_markup('<span foreground="#F59E0B">WARNING: All data on selected disk will be erased!</span>')
-        warn.set_halign(Gtk.Align.START)
-        box.pack_start(warn, False, False, 0)
+        # Navigation buttons
+        nav = tk.Frame(self.content, bg=BG2, pady=8)
+        nav.pack(fill='x', side='bottom')
+        self._back_btn = self._btn(nav, "Back",
+                                   self._install_back, BG3)
+        self._back_btn.pack(side='left', padx=12)
+        self._next_btn = self._btn(nav, "Next",
+                                   self._install_next, PURPLE)
+        self._next_btn.pack(side='right', padx=12)
+
+        self._show_install_step(0)
+
+    def _show_install_step(self, step):
+        self._install_step = step
+        for w in self._wizard_frame.winfo_children():
+            w.destroy()
+
+        names = ['Disk', 'User', 'Settings', 'Confirm']
+        for i, ind in enumerate(self._step_indicators):
+            if i < step:
+                ind.config(fg=GREEN)
+            elif i == step:
+                ind.config(fg=PURPLE,
+                           font=('Arial', 9, 'bold'))
+            else:
+                ind.config(fg=GRAY,
+                           font=('Arial', 9))
+
+        self._step_label.config(
+            text=f"Step {step+1} of 4: {names[step]}")
+
+        [self._install_step_disk,
+         self._install_step_user,
+         self._install_step_settings,
+         self._install_step_confirm][step]()
+
+        self._back_btn.config(state='normal' if step > 0
+                              else 'disabled')
+        if step == 3:
+            self._next_btn.config(
+                text="INSTALL NOW", bg=RED)
+        else:
+            self._next_btn.config(
+                text="Next →", bg=PURPLE)
+
+    def _install_back(self):
+        if self._install_step > 0:
+            self._show_install_step(self._install_step - 1)
+
+    def _install_next(self):
+        if self._install_step < 3:
+            self._show_install_step(self._install_step + 1)
+        else:
+            if messagebox.askyesno(
+                    "⚠ FINAL WARNING",
+                    f"Install RIDOS OS to "
+                    f"{self.install_data['disk']}?\n\n"
+                    "ALL DATA WILL BE PERMANENTLY ERASED!\n\n"
+                    "This cannot be undone."):
+                self._start_install()
+
+    def _install_step_disk(self):
+        f = self._wizard_frame
+        tk.Label(f, text="Select the disk to install RIDOS OS on:",
+                 font=('Arial', 11), bg=BG, fg=TEXT).pack(
+                     anchor='w', pady=(0, 8))
+        tk.Label(f,
+                 text="⚠  All data on the selected disk will be erased!",
+                 font=('Arial', 10), bg=BG, fg=YELLOW).pack(
+                     anchor='w', pady=(0, 12))
 
         disks = get_disks()
-        self.install_disk_combo = Gtk.ComboBoxText()
+        if not disks:
+            tk.Label(f, text="No disks found!",
+                     font=('Arial', 11), bg=BG, fg=RED).pack()
+            return
+
+        self._disk_var = tk.StringVar()
         for d in disks:
-            self.install_disk_combo.append_text(
-                f"/dev/{d['name']}  —  {d['size']}  —  {d['model']}")
-        if disks:
-            self.install_disk_combo.set_active(0)
-            self.install_data['disk'] = disks[0]['path']
+            text = (f"/dev/{d['name']}  —  {d['size']}  "
+                    f"—  {d['model']}")
+            rb = tk.Radiobutton(
+                f, text=text,
+                variable=self._disk_var,
+                value=d['path'],
+                font=('Arial', 11),
+                bg=BG, fg=TEXT,
+                selectcolor=BG3,
+                activebackground=BG,
+                command=lambda p=d['path']:
+                    self.install_data.__setitem__('disk', p))
+            rb.pack(anchor='w', pady=3)
+            if not self.install_data['disk']:
+                rb.invoke()
 
-        def on_disk(combo):
-            idx = combo.get_active()
-            if 0 <= idx < len(disks):
-                self.install_data['disk'] = disks[idx]['path']
+        tk.Label(f,
+                 text="\nPartition layout that will be created:\n"
+                      "  1.  512 MB   EFI  (FAT32)\n"
+                      "  2.    4 GB   Swap\n"
+                      "  3. Remaining Root  (EXT4)",
+                 font=('Courier', 9),
+                 bg=BG, fg=GRAY,
+                 justify='left').pack(anchor='w', pady=12)
 
-        self.install_disk_combo.connect('changed', on_disk)
-        box.pack_start(self.install_disk_combo, False, False, 0)
+    def _install_step_user(self):
+        f = self._wizard_frame
+        tk.Label(f, text="User Account",
+                 font=('Arial', 12, 'bold'),
+                 bg=BG, fg=PURPLE).pack(anchor='w', pady=(0, 12))
 
-        # Partition preview
-        prev = Gtk.Label()
-        prev.set_markup(
-            '<span foreground="#6B7280" size="small">\n'
-            'Partitions to be created:\n'
-            '  1.  512 MB   EFI  (FAT32)\n'
-            '  2.  4 GB     Swap\n'
-            '  3.  Remaining  Root  (EXT4)\n</span>')
-        prev.set_halign(Gtk.Align.START)
-        box.pack_start(prev, False, False, 0)
-        return box
-
-    def _install_page_user(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_border_width(16)
-        lbl = Gtk.Label(label="User Account")
-        lbl.get_style_context().add_class('page-title')
-        lbl.set_halign(Gtk.Align.START)
-        box.pack_start(lbl, False, False, 0)
-
-        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        self._user_entries = {}
         fields = [
-            ("Full Name",  'fullname',  'RIDOS User', False),
-            ("Username",   'username',  'ridos',      False),
-            ("Password",   'password',  'ridos',      True),
-            ("Hostname",   'hostname',  'ridos-os',   False),
+            ('Full Name',  'fullname',  'RIDOS User', False),
+            ('Username',   'username',  'ridos',      False),
+            ('Password',   'password',  'ridos',      True),
+            ('Hostname',   'hostname',  'ridos-os',   False),
         ]
-        for i, (label, key, default, secret) in enumerate(fields):
-            lbl2 = Gtk.Label(label=f"{label}:")
-            lbl2.set_halign(Gtk.Align.END)
-            entry = Gtk.Entry()
-            entry.set_text(self.install_data.get(key, default))
-            entry.get_style_context().add_class('input')
-            entry.set_width_chars(28)
+        for label, key, default, secret in fields:
+            row = tk.Frame(f, bg=BG)
+            row.pack(fill='x', pady=5)
+            tk.Label(row, text=f"{label}:",
+                     font=('Arial', 10),
+                     bg=BG, fg=TEXT,
+                     width=12, anchor='e').pack(side='left')
+            e = tk.Entry(row, font=('Arial', 11),
+                         bg=BG2, fg=TEXT,
+                         insertbackground=TEXT,
+                         relief='flat', bd=4, width=28)
+            e.insert(0, self.install_data.get(key, default))
             if secret:
-                entry.set_visibility(False)
-            def make_cb(k):
-                return lambda e: self.install_data.__setitem__(k, e.get_text())
-            entry.connect('changed', make_cb(key))
-            grid.attach(lbl2, 0, i, 1, 1)
-            grid.attach(entry, 1, i, 1, 1)
-        box.pack_start(grid, False, False, 0)
-        return box
+                e.config(show='*')
+            e.pack(side='left', padx=8)
+            e.bind('<KeyRelease>',
+                   lambda ev, k=key:
+                   self.install_data.__setitem__(
+                       k, ev.widget.get()))
+            self._user_entries[key] = e
 
-    def _install_page_settings(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_border_width(16)
-        lbl = Gtk.Label(label="System Settings")
-        lbl.get_style_context().add_class('page-title')
-        lbl.set_halign(Gtk.Align.START)
-        box.pack_start(lbl, False, False, 0)
+    def _install_step_settings(self):
+        f = self._wizard_frame
+        tk.Label(f, text="System Settings",
+                 font=('Arial', 12, 'bold'),
+                 bg=BG, fg=PURPLE).pack(anchor='w', pady=(0, 12))
 
-        row = Gtk.Box(spacing=12)
-        tz_lbl = Gtk.Label(label="Timezone:")
-        tz_lbl.set_width_chars(12)
-        out, _ = run("timedatectl list-timezones 2>/dev/null | head -80")
-        zones = out.strip().split('\n') if out.strip() else ["Asia/Baghdad", "UTC"]
-        self.tz_combo = Gtk.ComboBoxText()
-        default_idx = 0
-        for i, z in enumerate(zones):
-            self.tz_combo.append_text(z)
-            if z == "Asia/Baghdad":
-                default_idx = i
-        self.tz_combo.set_active(default_idx)
-        self.install_data['timezone'] = zones[default_idx] if zones else "Asia/Baghdad"
-        self.tz_combo.connect('changed', lambda c: self.install_data.__setitem__(
-            'timezone', c.get_active_text() or 'Asia/Baghdad'))
-        row.pack_start(tz_lbl, False, False, 0)
-        row.pack_start(self.tz_combo, False, False, 0)
-        box.pack_start(row, False, False, 0)
-        return box
+        row = tk.Frame(f, bg=BG)
+        row.pack(fill='x', pady=5)
+        tk.Label(row, text="Timezone:",
+                 font=('Arial', 10),
+                 bg=BG, fg=TEXT,
+                 width=12, anchor='e').pack(side='left')
 
-    def _install_page_confirm(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_border_width(16)
-        lbl = Gtk.Label(label="Confirm Installation")
-        lbl.get_style_context().add_class('page-title')
-        lbl.set_halign(Gtk.Align.START)
-        box.pack_start(lbl, False, False, 0)
+        out, _ = run_cmd(
+            "timedatectl list-timezones 2>/dev/null | head -100")
+        zones = (out.strip().split('\n')
+                 if out.strip()
+                 else ["Asia/Baghdad", "UTC"])
 
-        self.confirm_summary = Gtk.Label(label="")
-        self.confirm_summary.set_halign(Gtk.Align.START)
-        box.pack_start(self.confirm_summary, False, False, 0)
+        self._tz_var = tk.StringVar(
+            value=self.install_data.get('timezone', 'Asia/Baghdad'))
+        tz_combo = ttk.Combobox(row,
+                                textvariable=self._tz_var,
+                                values=zones,
+                                font=('Arial', 10),
+                                width=30, state='readonly')
+        tz_combo.pack(side='left', padx=8)
+        tz_combo.bind('<<ComboboxSelected>>',
+                      lambda e: self.install_data.__setitem__(
+                          'timezone', self._tz_var.get()))
 
-        warn = Gtk.Label()
-        warn.set_markup(
-            '<span foreground="#EF4444" size="large">'
-            '<b>ALL DATA ON THE DISK WILL BE ERASED!</b></span>')
-        warn.set_justify(Gtk.Justification.CENTER)
-        box.pack_start(warn, False, False, 20)
+    def _install_step_confirm(self):
+        f = self._wizard_frame
+        tk.Label(f, text="Review before installing:",
+                 font=('Arial', 11, 'bold'),
+                 bg=BG, fg=TEXT).pack(anchor='w', pady=(0, 10))
 
-        note = Gtk.Label()
-        note.set_markup('<span foreground="#9CA3AF">Click "Install" to begin installation.</span>')
-        box.pack_start(note, False, False, 0)
-        return box
+        d = self.install_data
+        details = (
+            f"  Disk:      {d.get('disk', 'NOT SET')}\n"
+            f"  Username:  {d.get('username', '')}\n"
+            f"  Hostname:  {d.get('hostname', '')}\n"
+            f"  Timezone:  {d.get('timezone', '')}\n"
+        )
+        tk.Label(f, text=details,
+                 font=('Courier', 11),
+                 bg=BG2, fg=TEXT,
+                 justify='left',
+                 padx=12, pady=10).pack(
+                     fill='x', pady=8)
 
-    def _install_page_progress(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_border_width(16)
-        self.progress_title = Gtk.Label(label="Installing RIDOS OS...")
-        self.progress_title.get_style_context().add_class('page-title')
-        self.progress_title.set_halign(Gtk.Align.START)
-        box.pack_start(self.progress_title, False, False, 0)
+        tk.Label(f,
+                 text="⚠  ALL DATA ON THE DISK WILL BE ERASED!",
+                 font=('Arial', 12, 'bold'),
+                 bg=BG, fg=RED).pack(pady=8)
+        tk.Label(f,
+                 text='Click "INSTALL NOW" to begin.',
+                 font=('Arial', 10),
+                 bg=BG, fg=GRAY).pack()
 
-        self.progress_bar = Gtk.ProgressBar()
-        self.progress_bar.get_style_context().add_class('progress')
-        box.pack_start(self.progress_bar, False, False, 0)
+    # ─── Installation engine ───────────────────────────────────
+    def _start_install(self):
+        # Replace wizard with progress screen
+        for w in self.content.winfo_children():
+            w.destroy()
 
-        self.progress_status = Gtk.Label(label="Preparing...")
-        self.progress_status.set_halign(Gtk.Align.START)
-        box.pack_start(self.progress_status, False, False, 0)
+        top = tk.Frame(self.content, bg=BG2, pady=8)
+        top.pack(fill='x')
+        tk.Label(top, text="Installing RIDOS OS...",
+                 font=('Arial', 14, 'bold'),
+                 bg=BG2, fg=PURPLE).pack(side='left', padx=14)
 
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_min_content_height(300)
-        self.log_buf = Gtk.TextBuffer()
-        self.log_view = Gtk.TextView(buffer=self.log_buf)
-        self.log_view.get_style_context().add_class('log')
-        self.log_view.set_editable(False)
-        self.log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        scroll.add(self.log_view)
-        box.pack_start(scroll, True, True, 0)
-        return box
+        self._prog_status = tk.Label(
+            self.content,
+            text="Preparing...",
+            font=('Arial', 10),
+            bg=BG, fg=YELLOW)
+        self._prog_status.pack(anchor='w', padx=14, pady=4)
 
-    def _install_page_done(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        box.set_border_width(24)
-        icon = Gtk.Label(label="RIDOS OS Installed!")
-        icon.get_style_context().add_class('status-ok')
-        icon.set_halign(Gtk.Align.CENTER)
-        box.pack_start(icon, False, False, 20)
+        self._prog_bar = ttk.Progressbar(
+            self.content,
+            orient='horizontal',
+            length=900, mode='determinate')
+        self._prog_bar.pack(padx=14, pady=4)
 
-        self.done_info = Gtk.Label(label="")
-        self.done_info.set_halign(Gtk.Align.CENTER)
-        box.pack_start(self.done_info, False, False, 0)
+        # Log window
+        log_frame = tk.Frame(self.content, bg=BG)
+        log_frame.pack(fill='both', expand=True, padx=14, pady=4)
+        self._log_text = tk.Text(
+            log_frame,
+            bg='#111827', fg='#A5F3FC',
+            font=('Courier', 10),
+            relief='flat', state='disabled')
+        scrollbar = tk.Scrollbar(log_frame,
+                                 command=self._log_text.yview)
+        self._log_text.config(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        self._log_text.pack(fill='both', expand=True)
 
-        reboot_btn = Gtk.Button(label="Reboot Now")
-        reboot_btn.get_style_context().add_class('btn-success')
-        reboot_btn.connect('clicked', lambda w: run("reboot"))
-        reboot_btn.set_halign(Gtk.Align.CENTER)
-        box.pack_start(reboot_btn, False, False, 20)
-        return box
-
-    def _update_install_nav(self):
-        page = self.notebook.get_current_page()
-        total = 4
-        self.install_step_lbl.set_text(f"Step {page+1} of {total}")
-        self.install_back_btn.set_sensitive(page > 0 and page < 4)
-        self.install_next_btn.set_sensitive(page < 4)
-        if page == 3:
-            self.install_next_btn.set_label("Install!")
-            self.install_next_btn.get_style_context().add_class('btn-danger')
-            self.install_next_btn.get_style_context().remove_class('btn-primary')
-            # Update summary
-            d = self.install_data
-            self.confirm_summary.set_markup(
-                f'<span foreground="#E9D5FF">'
-                f'<b>Disk:</b>      {d.get("disk","?")}\n'
-                f'<b>Username:</b>  {d.get("username","?")}\n'
-                f'<b>Hostname:</b>  {d.get("hostname","?")}\n'
-                f'<b>Timezone:</b>  {d.get("timezone","?")}\n'
-                f'</span>')
-        elif page >= 4:
-            self.install_next_btn.set_sensitive(False)
-            self.install_back_btn.set_sensitive(False)
-        else:
-            self.install_next_btn.set_label("Next")
-            self.install_next_btn.get_style_context().remove_class('btn-danger')
-            self.install_next_btn.get_style_context().add_class('btn-primary')
-
-    def _install_next(self, widget):
-        page = self.notebook.get_current_page()
-        if page == 3:
-            self.notebook.set_current_page(4)
-            self._update_install_nav()
-            threading.Thread(target=self._do_install, daemon=True).start()
-        elif page < 4:
-            self.notebook.set_current_page(page + 1)
-            self._update_install_nav()
-
-    def _install_back(self, widget):
-        page = self.notebook.get_current_page()
-        if page > 0:
-            self.notebook.set_current_page(page - 1)
-            self._update_install_nav()
+        threading.Thread(
+            target=self._do_install,
+            daemon=True).start()
 
     def _log(self, msg):
-        def _do(m):
-            end = self.log_buf.get_end_iter()
-            self.log_buf.insert(end, m + "\n")
-            self.log_view.scroll_to_iter(
-                self.log_buf.get_end_iter(), 0, False, 0, 1)
-        GLib.idle_add(_do, msg)
+        def _do():
+            self._log_text.config(state='normal')
+            self._log_text.insert('end', msg + '\n')
+            self._log_text.see('end')
+            self._log_text.config(state='disabled')
+        self.root.after(0, _do)
 
-    def _set_progress(self, frac, status):
-        GLib.idle_add(self.progress_bar.set_fraction, frac)
-        GLib.idle_add(self.progress_status.set_text, status)
+    def _set_prog(self, pct, status):
+        self.root.after(0, self._prog_bar.config,
+                        {'value': pct})
+        self.root.after(0, self._prog_status.config,
+                        {'text': status})
 
     def _do_install(self):
-        d = self.install_data
-        disk     = d['disk']
+        d   = self.install_data
+        disk = d['disk']
         username = d['username']
         password = d['password']
         hostname = d['hostname']
         timezone = d['timezone']
         target   = '/mnt/ridos-install'
 
-        if 'nvme' in disk:
-            efi = disk + 'p1'; swap = disk + 'p2'; root = disk + 'p3'
-        else:
-            efi = disk + '1';  swap = disk + '2';  root = disk + '3'
+        pfx  = disk + 'p' if 'nvme' in disk else disk
+        efi  = pfx + '1'
+        swap = pfx + '2'
+        root = pfx + '3'
 
         try:
-            # 1. Partition
-            self._set_progress(0.05, "Partitioning disk...")
+            # Step 1: Partition
+            self._set_prog(5, "Partitioning disk...")
             self._log(f"[1/7] Partitioning {disk}...")
             for cmd in [
                 f"parted -s {disk} mklabel gpt",
                 f"parted -s {disk} mkpart ESP fat32 1MiB 512MiB",
                 f"parted -s {disk} set 1 esp on",
-                f"parted -s {disk} mkpart primary linux-swap 512MiB 4608MiB",
+                f"parted -s {disk} mkpart primary linux-swap "
+                f"512MiB 4608MiB",
                 f"parted -s {disk} mkpart primary ext4 4608MiB 100%",
                 "sleep 2",
                 f"partprobe {disk}",
             ]:
-                out, code = run(cmd)
-                self._log(f"  {'OK' if code==0 else 'WARN'}: {cmd}")
+                out, code = run_cmd(cmd, 30)
+                self._log(f"  {'OK' if code==0 else 'WARN'}: "
+                          f"{cmd.split()[0]}")
 
-            # 2. Format
-            self._set_progress(0.12, "Formatting partitions...")
+            # Step 2: Format
+            self._set_prog(12, "Formatting partitions...")
             self._log("[2/7] Formatting...")
             for cmd, desc in [
-                (f"mkfs.fat -F32 -n EFI {efi}", "EFI"),
-                (f"mkswap {swap}",               "Swap"),
-                (f"mkfs.ext4 -F -L RIDOS {root}","Root"),
+                (f"mkfs.fat -F32 -n EFI {efi}",  "EFI"),
+                (f"mkswap {swap}",                "Swap"),
+                (f"mkfs.ext4 -F -L RIDOS {root}", "Root"),
             ]:
-                out, code = run(cmd, 60)
-                self._log(f"  {desc}: {'OK' if code==0 else out[:80]}")
+                out, code = run_cmd(cmd, 60)
+                self._log(f"  {desc}: "
+                          f"{'OK' if code==0 else out[:80]}")
                 if code != 0 and desc == "Root":
-                    raise Exception(f"Format failed: {out}")
+                    raise Exception(
+                        f"Format root failed: {out}")
 
-            # 3. Mount
-            self._set_progress(0.18, "Mounting target...")
+            # Step 3: Mount
+            self._set_prog(18, "Mounting target...")
             self._log("[3/7] Mounting...")
-            run(f"mkdir -p {target}")
-            out, code = run(f"mount {root} {target}")
+            run_cmd(f"mkdir -p {target}")
+            out, code = run_cmd(f"mount {root} {target}")
             if code != 0:
-                raise Exception(f"Cannot mount root: {out}")
-            run(f"mkdir -p {target}/boot/efi")
-            run(f"mount {efi} {target}/boot/efi")
-            run(f"swapon {swap} 2>/dev/null || true")
+                raise Exception(
+                    f"Cannot mount root: {out}")
+            run_cmd(f"mkdir -p {target}/boot/efi")
+            run_cmd(f"mount {efi} {target}/boot/efi")
+            run_cmd(f"swapon {swap} 2>/dev/null || true")
 
-            # 4. Find and copy squashfs
-            self._set_progress(0.20, "Finding system image...")
+            # Step 4: Find squashfs
+            self._set_prog(20, "Finding system image...")
             self._log("[4/7] Locating system image...")
             sq = find_squashfs()
             if not sq:
-                raise Exception("Cannot find filesystem.squashfs!")
+                raise Exception(
+                    "Cannot find filesystem.squashfs!\n"
+                    "Make sure you are running from the live USB.")
             self._log(f"  Found: {sq}")
-
-            # Fix permissions
-            run(f"chmod 644 {sq} 2>/dev/null || true")
+            run_cmd(f"chmod 644 {sq} 2>/dev/null || true")
 
             # Mount squashfs
-            run("mkdir -p /mnt/ridos-sq")
-            out, code = run(f"mount -t squashfs -o loop,ro {sq} /mnt/ridos-sq")
+            run_cmd("mkdir -p /mnt/ridos-sq")
+            out, code = run_cmd(
+                f"mount -t squashfs -o loop,ro {sq} /mnt/ridos-sq")
             if code != 0:
-                raise Exception(f"Cannot mount squashfs: {out}")
+                raise Exception(
+                    f"Cannot mount squashfs: {out}")
 
-            self._set_progress(0.25, "Copying files (10-20 min)...")
+            # Step 5: Copy files
+            self._set_prog(25, "Copying files (10-20 min)...")
             self._log("[5/7] Copying RIDOS OS to disk...")
-            out, code = run(
+            self._log("  This will take 10-20 minutes...")
+            out, code = run_cmd(
                 f"rsync -aAXH "
-                f"--exclude=/proc --exclude=/sys --exclude=/dev "
-                f"--exclude=/run --exclude=/tmp --exclude=/mnt "
+                f"--exclude=/proc --exclude=/sys "
+                f"--exclude=/dev --exclude=/run "
+                f"--exclude=/tmp --exclude=/mnt "
                 f"--exclude=/media --exclude=/lost+found "
                 f"/mnt/ridos-sq/ {target}/",
                 timeout=1800)
-            run("umount /mnt/ridos-sq 2>/dev/null; rmdir /mnt/ridos-sq 2>/dev/null || true")
+            run_cmd("umount /mnt/ridos-sq; "
+                    "rmdir /mnt/ridos-sq 2>/dev/null || true")
             if code != 0:
-                raise Exception(f"Copy failed (rsync exit {code}): {out[-300:]}")
+                raise Exception(
+                    f"rsync failed (code {code}):\n"
+                    f"{out[-200:]}")
             self._log("  Copy complete!")
 
-            # 5. Configure
-            self._set_progress(0.75, "Configuring system...")
-            self._log("[6/7] Configuring installed system...")
-
-            for dd in ['proc','sys','dev','run','tmp']:
-                run(f"mkdir -p {target}/{dd}")
+            # Step 6: Configure
+            self._set_prog(75, "Configuring system...")
+            self._log("[6/7] Configuring...")
+            for dd in ['proc','sys','dev','dev/pts','run','tmp']:
+                run_cmd(f"mkdir -p {target}/{dd}")
 
             # fstab
-            ru, _ = run(f"blkid -s UUID -o value {root}")
-            eu, _ = run(f"blkid -s UUID -o value {efi}")
-            su, _ = run(f"blkid -s UUID -o value {swap}")
+            ru, _ = run_cmd(
+                f"blkid -s UUID -o value {root}")
+            eu, _ = run_cmd(
+                f"blkid -s UUID -o value {efi}")
+            su, _ = run_cmd(
+                f"blkid -s UUID -o value {swap}")
             with open(f"{target}/etc/fstab", 'w') as f:
-                f.write(f"UUID={ru.strip()}  /          ext4  defaults,noatime  0 1\n")
-                f.write(f"UUID={eu.strip()}  /boot/efi  vfat  umask=0077        0 2\n")
-                f.write(f"UUID={su.strip()}  none       swap  sw                0 0\n")
+                f.write(
+                    f"UUID={ru.strip()}  /          "
+                    f"ext4  defaults,noatime  0 1\n"
+                    f"UUID={eu.strip()}  /boot/efi  "
+                    f"vfat  umask=0077        0 2\n"
+                    f"UUID={su.strip()}  none       "
+                    f"swap  sw                0 0\n")
             self._log("  fstab written")
 
             with open(f"{target}/etc/hostname", 'w') as f:
-                f.write(hostname + "\n")
+                f.write(hostname + '\n')
 
-            run(f"chroot {target} ln -sf /usr/share/zoneinfo/{timezone} /etc/localtime 2>/dev/null || true")
+            run_cmd(
+                f"chroot {target} ln -sf "
+                f"/usr/share/zoneinfo/{timezone} "
+                f"/etc/localtime 2>/dev/null || true")
 
-            # User
-            run(f"chroot {target} userdel -r {username} 2>/dev/null || true")
-            run(f"chroot {target} useradd -m -s /bin/bash -G sudo,audio,video,netdev,plugdev {username}")
-            run(f"echo '{username}:{password}' | chroot {target} chpasswd")
-            run(f"echo 'root:{password}' | chroot {target} chpasswd")
+            run_cmd(
+                f"chroot {target} userdel -r {username} "
+                f"2>/dev/null || true")
+            run_cmd(
+                f"chroot {target} useradd -m -s /bin/bash "
+                f"-G sudo,audio,video,netdev,plugdev "
+                f"{username}")
+            run_cmd(
+                f"echo '{username}:{password}' | "
+                f"chroot {target} chpasswd")
+            run_cmd(
+                f"echo 'root:{password}' | "
+                f"chroot {target} chpasswd")
             self._log(f"  User '{username}' created")
 
-            # Remove live packages
-            run(f"chroot {target} apt-get remove -y live-boot live-boot-initramfs-tools 2>/dev/null || true")
+            run_cmd(
+                f"chroot {target} apt-get remove -y "
+                f"live-boot live-boot-initramfs-tools "
+                f"2>/dev/null || true")
 
             # Bind mounts for GRUB
-            for dd in ['dev','dev/pts','proc','sys']:
-                run(f"mount --bind /{dd} {target}/{dd}")
+            for dd in ['dev', 'dev/pts', 'proc', 'sys']:
+                run_cmd(
+                    f"mount --bind /{dd} {target}/{dd}")
 
-            # Update initramfs
-            self._set_progress(0.85, "Updating initramfs...")
-            run(f"chroot {target} update-initramfs -u -k all 2>/dev/null || true", 120)
-            self._log("  initramfs updated")
+            run_cmd(
+                f"chroot {target} update-initramfs "
+                f"-u -k all 2>/dev/null || true", 120)
 
-            # 6. GRUB
-            self._set_progress(0.90, "Installing bootloader...")
+            # Step 7: GRUB
+            self._set_prog(88, "Installing bootloader...")
             self._log(f"[7/7] Installing GRUB on {disk}...")
-            out, code = run(
+            out, code = run_cmd(
                 f"chroot {target} grub-install "
-                f"--target=i386-pc --recheck --force --no-floppy {disk}")
-            self._log(f"  grub-install: {'OK' if code==0 else out[-200:]}")
+                f"--target=i386-pc --recheck "
+                f"--force --no-floppy {disk}")
+            self._log(f"  grub-install: "
+                      f"{'OK' if code==0 else out[-100:]}")
 
-            out2, code2 = run(f"chroot {target} update-grub")
-            self._log(f"  update-grub: {'OK' if code2==0 else out2[-200:]}")
+            out2, code2 = run_cmd(
+                f"chroot {target} update-grub")
+            self._log(f"  update-grub: "
+                      f"{'OK' if code2==0 else out2[-100:]}")
 
-            # Unmount
+            # Cleanup
             for dd in ['sys','proc','dev/pts','dev']:
-                run(f"umount {target}/{dd} 2>/dev/null || true")
-            run(f"umount {target}/boot/efi 2>/dev/null || true")
-            run(f"umount {target} 2>/dev/null || true")
-            run(f"swapoff {swap} 2>/dev/null || true")
+                run_cmd(
+                    f"umount {target}/{dd} 2>/dev/null || true")
+            run_cmd(
+                f"umount {target}/boot/efi 2>/dev/null || true")
+            run_cmd(
+                f"umount {target} 2>/dev/null || true")
+            run_cmd(f"swapoff {swap} 2>/dev/null || true")
 
-            self._set_progress(1.0, "Done!")
-            self._log("\n=== Installation complete! ===")
+            self._set_prog(100, "Installation complete!")
+            self._log("\n=== RIDOS OS installed successfully! ===")
+            self._log(f"Username: {username}")
+            self._log(f"Password: {password}")
+            self._log("\nRemove USB and reboot!")
 
-            GLib.idle_add(self._install_done)
+            self.root.after(0, self._show_done)
 
         except Exception as e:
             self._log(f"\nFATAL ERROR: {e}")
-            self._set_progress(0, f"FAILED: {e}")
-            GLib.idle_add(self._msg, str(e), "error")
+            self._set_prog(0, f"FAILED: {e}")
+            self.root.after(0, messagebox.showerror,
+                            "Installation Failed", str(e))
 
-    def _install_done(self):
-        self.done_info.set_markup(
-            f'<span foreground="#E9D5FF">\n'
-            f'Username: <b>{self.install_data["username"]}</b>\n'
-            f'Password: <b>{self.install_data["password"]}</b>\n\n'
-            f'Remove USB and reboot!\n</span>')
-        self.notebook.set_current_page(5)
-        self._update_install_nav()
+    def _show_done(self):
+        for w in self.content.winfo_children():
+            w.destroy()
+        f = tk.Frame(self.content, bg=BG)
+        f.pack(fill='both', expand=True)
+        tk.Label(f, text="✓ Installation Complete!",
+                 font=('Arial', 20, 'bold'),
+                 bg=BG, fg=GREEN).pack(pady=40)
+        tk.Label(f,
+                 text=f"Username: {self.install_data['username']}\n"
+                      f"Password: {self.install_data['password']}\n\n"
+                      "Remove USB drive and reboot.",
+                 font=('Arial', 12),
+                 bg=BG, fg=TEXT,
+                 justify='center').pack()
+        self._btn(f, "Reboot Now",
+                  lambda: run_cmd("reboot"),
+                  GREEN).pack(pady=20)
+        self._btn(f, "Close",
+                  self.root.destroy,
+                  BG3).pack()
 
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     # PAGE: About
-    # ══════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
     def _page_about(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_border_width(24)
-        lbl = Gtk.Label()
-        lbl.set_markup(
-            '<span foreground="#C4B5FD" size="xx-large"><b>RIDOS OS</b></span>\n'
-            '<span foreground="#E9D5FF">v1.0 Baghdad</span>\n\n'
-            '<span foreground="#9CA3AF">'
-            'AI-Powered Linux for IT Professionals\n\n'
-            'Disk Manager + OS Installer\n'
-            'No Calamares - Pure Python GTK3\n\n'
-            'License: GPL v3\n'
-            'github.com/alkinanireyad/RIDOS-OS'
-            '</span>')
-        lbl.set_justify(Gtk.Justification.CENTER)
-        box.pack_start(lbl, True, True, 0)
-        self.main_box.pack_start(box, True, True, 0)
+        f = tk.Frame(self.content, bg=BG)
+        f.pack(fill='both', expand=True, padx=24, pady=24)
+        tk.Label(f,
+                 text="RIDOS OS v1.0 Baghdad",
+                 font=('Arial', 20, 'bold'),
+                 bg=BG, fg=PURPLE).pack(pady=(20, 8))
+        tk.Label(f,
+                 text="AI-Powered Linux for IT & Communications Professionals",
+                 font=('Arial', 12),
+                 bg=BG, fg=TEXT).pack()
+        tk.Label(f,
+                 text="\nDisk Manager + OS Installer\n"
+                      "Built with Python 3 + Tkinter\n"
+                      "No Calamares — Full control\n\n"
+                      "License: GPL v3\n"
+                      "github.com/alkinanireyad/RIDOS-OS",
+                 font=('Arial', 11),
+                 bg=BG, fg=GRAY,
+                 justify='center').pack(pady=12)
 
-    # ── Helpers ───────────────────────────────────────────────
-    def _confirm(self, title, message):
-        dialog = Gtk.MessageDialog(
-            parent=self, flags=0,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text=title)
-        dialog.format_secondary_text(message)
-        response = dialog.run()
-        dialog.destroy()
-        return response == Gtk.ResponseType.YES
+    def run(self):
+        self.root.mainloop()
 
-    def _msg(self, message, kind="info"):
-        types = {
-            "info":    Gtk.MessageType.INFO,
-            "warning": Gtk.MessageType.WARNING,
-            "error":   Gtk.MessageType.ERROR,
-            "ok":      Gtk.MessageType.INFO,
-        }
-        dialog = Gtk.MessageDialog(
-            parent=self, flags=0,
-            message_type=types.get(kind, Gtk.MessageType.INFO),
-            buttons=Gtk.ButtonsType.OK,
-            text=message)
-        dialog.run()
-        dialog.destroy()
-
-    def _run_with_log(self, title, commands, callback=None):
-        win = Gtk.Dialog(title=title, parent=self, flags=0)
-        win.set_default_size(500, 300)
-        box = win.get_content_area()
-        buf = Gtk.TextBuffer()
-        tv = Gtk.TextView(buffer=buf)
-        tv.get_style_context().add_class('log')
-        tv.set_editable(False)
-        sc = Gtk.ScrolledWindow()
-        sc.add(tv)
-        sc.set_min_content_height(200)
-        box.pack_start(sc, True, True, 8)
-        win.show_all()
-
-        def do_run():
-            for cmd in commands:
-                out, code = run(cmd)
-                GLib.idle_add(lambda o=f"$ {cmd}\n{out}\n": buf.insert(buf.get_end_iter(), o))
-                time.sleep(0.3)
-            GLib.idle_add(win.destroy)
-            if callback:
-                GLib.idle_add(callback)
-
-        threading.Thread(target=do_run, daemon=True).start()
-        win.run()
-
-
-def main():
-    # ── Step 1: Fix DISPLAY ───────────────────────────────
-    # sudo strips env vars - restore them so GTK can connect to X
-    if not os.environ.get('DISPLAY'):
-        os.environ['DISPLAY'] = ':0'
-
-    # Fix XAUTHORITY for root/sudo
-    sudo_user = os.environ.get('SUDO_USER', 'ridos')
-    if not os.environ.get('XAUTHORITY'):
-        for xauth in [
-            f'/home/{sudo_user}/.Xauthority',
-            '/home/ridos/.Xauthority',
-            f'/run/user/1000/gdm/Xauthority',
-            '/root/.Xauthority',
-        ]:
-            if os.path.exists(xauth):
-                os.environ['XAUTHORITY'] = xauth
-                break
-
-    # ── Step 2: Check root ────────────────────────────────
-    if os.geteuid() != 0:
-        # Re-exec with sudo -E (preserves DISPLAY + XAUTHORITY)
-        os.execvp('sudo', ['sudo', '-E', 'python3',
-                           os.path.abspath(__file__)])
-        return  # never reached
-
-    # ── Step 3: Verify GTK can connect to X ──────────────
-    try:
-        import gi
-        gi.require_version('Gtk', '3.0')
-        from gi.repository import Gtk, Gdk
-        # Test X connection
-        display = Gdk.Display.get_default()
-        if display is None:
-            raise RuntimeError("Cannot connect to X display")
-    except Exception as e:
-        # GTK failed - fall back to terminal mode
-        print(f"GTK error: {e}")
-        print("Running in terminal mode...")
-        _terminal_fallback()
-        return
-
-    # ── Step 4: Launch GUI ────────────────────────────────
-    app = RIDOSTool()
-    app.show_all()
-    Gtk.main()
-
-
-def _terminal_fallback():
-    import subprocess, json, time, random
-    print("\n=== RIDOS OS Installer (Terminal Mode) ===")
-    print("GTK not available - using text interface\n")
-
-    # Show disks
-    out = subprocess.run('lsblk -d -o NAME,SIZE,MODEL -n',
-        shell=True, capture_output=True, text=True).stdout
-    print("Available disks:")
-    print(out)
-
-    disk = input("Enter disk to install to (e.g. sda): ").strip()
-    if not disk:
-        print("Cancelled"); return
-    disk = f'/dev/{disk}'
-
-    confirm = input(f"ERASE ALL DATA on {disk}? Type YES: ").strip()
-    if confirm != 'YES':
-        print("Cancelled"); return
-
-    username = input("Username [ridos]: ").strip() or 'ridos'
-    password = input("Password [ridos]: ").strip() or 'ridos'
-    hostname = input("Hostname [ridos-os]: ").strip() or 'ridos-os'
-
-    print(f"\nInstalling to {disk}...")
-    print("This will take 10-20 minutes\n")
-
-    # Run actual installation
-    squashfs = None
-    for p in ['/run/live/medium/live/filesystem.squashfs',
-               '/lib/live/mount/medium/live/filesystem.squashfs']:
-        if os.path.exists(p):
-            squashfs = p
-            break
-    if not squashfs:
-        out = subprocess.run(
-            'find /run /lib/live -name filesystem.squashfs 2>/dev/null | head -1',
-            shell=True, capture_output=True, text=True).stdout.strip()
-        squashfs = out if out else None
-
-    if not squashfs:
-        print("ERROR: Cannot find filesystem.squashfs")
-        return
-
-    pfx = disk + 'p' if 'nvme' in disk else disk
-    efi  = pfx + '1'; swap = pfx + '2'; root = pfx + '3'
-    target = '/mnt/ridos-install'
-
-    steps = [
-        f'parted -s {disk} mklabel gpt',
-        f'parted -s {disk} mkpart ESP fat32 1MiB 512MiB',
-        f'parted -s {disk} set 1 esp on',
-        f'parted -s {disk} mkpart primary linux-swap 512MiB 4608MiB',
-        f'parted -s {disk} mkpart primary ext4 4608MiB 100%',
-        'sleep 2',
-        f'mkfs.fat -F32 {efi}',
-        f'mkswap {swap}',
-        f'mkfs.ext4 -F {root}',
-        f'mkdir -p {target}',
-        f'mount {root} {target}',
-        f'mkdir -p {target}/boot/efi',
-        f'mount {efi} {target}/boot/efi',
-        f'chmod 644 {squashfs}',
-        f'mkdir -p /mnt/ridos-sq',
-        f'mount -t squashfs -o loop,ro {squashfs} /mnt/ridos-sq',
-    ]
-    for cmd in steps:
-        print(f"  {cmd.split()[0]}...")
-        ret = subprocess.run(cmd, shell=True)
-        if ret.returncode != 0 and 'sleep' not in cmd:
-            print(f"  WARNING: {cmd}")
-
-    print("  Copying files (please wait)...")
-    ret = subprocess.run(
-        f'rsync -aAXH '
-        f'--exclude=/proc --exclude=/sys --exclude=/dev '
-        f'--exclude=/run --exclude=/tmp --exclude=/mnt '
-        f'--exclude=/media --exclude=/lost+found '
-        f'/mnt/ridos-sq/ {target}/',
-        shell=True, timeout=1800)
-    subprocess.run('umount /mnt/ridos-sq; rmdir /mnt/ridos-sq',
-        shell=True)
-
-    if ret.returncode != 0:
-        print("ERROR: File copy failed")
-        return
-
-    # Configure
-    print("  Configuring system...")
-    for d in ['proc','sys','dev','dev/pts','run','tmp']:
-        subprocess.run(f'mkdir -p {target}/{d}', shell=True)
-
-    ru = subprocess.run(f'blkid -s UUID -o value {root}',
-        shell=True, capture_output=True, text=True).stdout.strip()
-    eu = subprocess.run(f'blkid -s UUID -o value {efi}',
-        shell=True, capture_output=True, text=True).stdout.strip()
-    su = subprocess.run(f'blkid -s UUID -o value {swap}',
-        shell=True, capture_output=True, text=True).stdout.strip()
-
-    with open(f'{target}/etc/fstab', 'w') as f:
-        f.write(f'UUID={ru}  /          ext4  defaults,noatime  0 1\n')
-        f.write(f'UUID={eu}  /boot/efi  vfat  umask=0077        0 2\n')
-        f.write(f'UUID={su}  none       swap  sw                0 0\n')
-
-    with open(f'{target}/etc/hostname', 'w') as f:
-        f.write(hostname + '\n')
-
-    subprocess.run(f'chroot {target} userdel -r {username} 2>/dev/null || true',
-        shell=True)
-    subprocess.run(f'chroot {target} useradd -m -s /bin/bash '
-                   f'-G sudo,audio,video,netdev {username}', shell=True)
-    subprocess.run(f"echo '{username}:{password}' | chroot {target} chpasswd",
-        shell=True)
-    subprocess.run(f"echo 'root:{password}' | chroot {target} chpasswd",
-        shell=True)
-    subprocess.run(
-        f'chroot {target} apt-get remove -y live-boot live-boot-initramfs-tools 2>/dev/null || true',
-        shell=True)
-
-    # Bind mounts for GRUB
-    for d in ['dev', 'dev/pts', 'proc', 'sys']:
-        subprocess.run(f'mount --bind /{d} {target}/{d}', shell=True)
-
-    print("  Installing GRUB...")
-    subprocess.run(
-        f'chroot {target} grub-install --target=i386-pc --recheck --force --no-floppy {disk}',
-        shell=True)
-    subprocess.run(f'chroot {target} update-grub', shell=True)
-
-    for d in ['sys', 'proc', 'dev/pts', 'dev']:
-        subprocess.run(f'umount {target}/{d} 2>/dev/null || true', shell=True)
-    subprocess.run(f'umount {target}/boot/efi 2>/dev/null || true', shell=True)
-    subprocess.run(f'umount {target} 2>/dev/null || true', shell=True)
-
-    print("\n=== RIDOS OS installed successfully! ===")
-    print(f"Username: {username}  Password: {password}")
-    print("Remove USB and reboot!")
-
-    reboot = input("\nReboot now? (yes/no): ").strip()
-    if reboot == 'yes':
-        subprocess.run('reboot', shell=True)
 
 if __name__ == "__main__":
-    main()
+    app = RIDOSInstaller()
+    app.run()
