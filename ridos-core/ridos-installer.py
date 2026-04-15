@@ -58,55 +58,151 @@ def run_cmd(cmd, timeout=600):
         return str(e), 1
 
 def get_disks():
-    out, _ = run_cmd(
-        "lsblk -d -b -o NAME,SIZE,MODEL,TYPE -n 2>/dev/null")
     disks = []
-    for line in out.strip().split('\n'):
-        if not line.strip(): continue
-        parts = line.split(None, 3)
-        if len(parts) < 4: continue
-        name = parts[0]
-        size = parts[1]
-        model = parts[2]
-        dtype = parts[3].strip()
-        if dtype != 'disk' or 'loop' in name: continue
+
+    # Method 1: lsblk JSON (most reliable)
+    out, code = run_cmd(
+        "lsblk -d -b -J -o NAME,SIZE,MODEL,TYPE "
+        "2>/dev/null")
+    if code == 0 and out.strip():
         try:
-            size_gb = int(size) / 1024**3
-        except:
-            size_gb = 0
-        disks.append({
-            'name':  name,
-            'path':  f'/dev/{name}',
-            'size':  f'{size_gb:.1f} GB',
-            'model': model.strip() or 'Unknown',
-        })
+            import json as _json
+            data = _json.loads(out)
+            for d in data.get('blockdevices', []):
+                if d.get('type') != 'disk': continue
+                name = d.get('name', '')
+                if 'loop' in name or 'ram' in name:
+                    continue
+                try:
+                    size_gb = int(d.get('size', 0)) / 1024**3
+                except:
+                    size_gb = 0
+                model = (d.get('model') or '').strip()
+                disks.append({
+                    'name':  name,
+                    'path':  f'/dev/{name}',
+                    'size':  f'{size_gb:.1f} GB',
+                    'model': model or 'Unknown',
+                })
+            if disks:
+                return disks
+        except Exception:
+            pass
+
+    # Method 2: lsblk text - TYPE is LAST column
+    out, code = run_cmd(
+        "lsblk -d -b -o NAME,SIZE,MODEL,TYPE -n "
+        "2>/dev/null")
+    if code == 0 and out.strip():
+        for line in out.strip().split('\n'):
+            parts = line.split()
+            if len(parts) < 2: continue
+            name  = parts[0]
+            if 'loop' in name or 'ram' in name: continue
+            size  = parts[1]
+            # TYPE is always the LAST column
+            dtype = parts[-1].strip()
+            # MODEL is all columns between SIZE and TYPE
+            model = ' '.join(parts[2:-1]).strip()                     if len(parts) > 3 else ''
+            if dtype != 'disk': continue
+            try:
+                size_gb = int(size) / 1024**3
+            except:
+                size_gb = 0
+            disks.append({
+                'name':  name,
+                'path':  f'/dev/{name}',
+                'size':  f'{size_gb:.1f} GB',
+                'model': model or 'Unknown',
+            })
+        if disks:
+            return disks
+
+    # Method 3: /proc/partitions fallback
+    out, code = run_cmd("cat /proc/partitions 2>/dev/null")
+    if code == 0:
+        for line in out.strip().split('\n')[2:]:
+            parts = line.split()
+            if len(parts) < 4: continue
+            major, minor, blocks, name = parts[:4]
+            if 'loop' in name or 'ram' in name: continue
+            # Only whole disks (no digits at end for SATA,
+            # no p+digit for NVMe)
+            import re as _re
+            if _re.search(r'\d$', name) and                not _re.search(r'[a-z]\d*$', name): continue
+            if _re.search(r'p\d+$', name): continue
+            try:
+                size_gb = int(blocks) * 1024 / 1024**3
+            except:
+                size_gb = 0
+            disks.append({
+                'name':  name,
+                'path':  f'/dev/{name}',
+                'size':  f'{size_gb:.1f} GB',
+                'model': 'Unknown',
+            })
+
     return disks
 
 def get_partitions(disk_path):
+    parts = []
+    disk_name = os.path.basename(disk_path)
+
+    # Method 1: lsblk JSON
+    out, code = run_cmd(
+        f"lsblk -b -J -o NAME,SIZE,FSTYPE,MOUNTPOINT "
+        f"{disk_path} 2>/dev/null")
+    if code == 0 and out.strip():
+        try:
+            import json as _json
+            data = _json.loads(out)
+            devs = data.get('blockdevices', [])
+            children = []
+            for d in devs:
+                children += d.get('children', [])
+            for c in children:
+                name = c.get('name', '')
+                if not name: continue
+                try:
+                    size_gb = int(c.get('size', 0))                               / 1024**3
+                except:
+                    size_gb = 0
+                parts.append({
+                    'name':   name,
+                    'path':   f'/dev/{name}',
+                    'size':   f'{size_gb:.2f} GB',
+                    'fstype': c.get('fstype') or '',
+                    'mount':  c.get('mountpoint') or '',
+                })
+            if parts:
+                return parts
+        except Exception:
+            pass
+
+    # Method 2: lsblk text
     out, _ = run_cmd(
         f"lsblk -b -o NAME,SIZE,FSTYPE,MOUNTPOINT -n "
-        f"{disk_path} 2>/dev/null")
-    disk_name = os.path.basename(disk_path)
-    parts = []
-    for line in out.strip().split('\n'):
-        if not line.strip(): continue
-        cols = line.split(None, 3)
-        name = cols[0].lstrip('|-`├└─ ')
-        if name == disk_name: continue
-        size   = cols[1] if len(cols) > 1 else '0'
-        fstype = cols[2] if len(cols) > 2 else ''
-        mount  = cols[3].strip() if len(cols) > 3 else ''
-        try:
-            size_gb = int(size) / 1024**3
-        except:
-            size_gb = 0
-        parts.append({
-            'name':   name,
-            'path':   f'/dev/{name}',
-            'size':   f'{size_gb:.2f} GB',
-            'fstype': fstype,
-            'mount':  mount,
-        })
+        f"-P {disk_path} 2>/dev/null")
+    if out.strip():
+        import re as _re
+        for line in out.strip().split('\n'):
+            if not line.strip(): continue
+            kv = dict(_re.findall(
+                r'(\w+)="([^"]*)"', line))
+            name = kv.get('NAME', '').strip()
+            if not name or name == disk_name: continue
+            try:
+                size_gb = int(kv.get('SIZE', '0'))                           / 1024**3
+            except:
+                size_gb = 0
+            parts.append({
+                'name':   name,
+                'path':   f'/dev/{name}',
+                'size':   f'{size_gb:.2f} GB',
+                'fstype': kv.get('FSTYPE', ''),
+                'mount':  kv.get('MOUNTPOINT', ''),
+            })
+
     return parts
 
 def find_squashfs():
