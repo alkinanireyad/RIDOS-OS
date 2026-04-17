@@ -1426,30 +1426,43 @@ class RIDOSInstaller:
             # ── 7. GRUB ───────────────────────────────────
             self._prog(88, "Installing GRUB...")
             self._log(f"[7/7] Installing GRUB on {disk}...")
-
-            # Step A: Fix /etc/default/grub
-            # Remove live-boot params, set correct root
-            self._log("  Fixing /etc/default/grub...")
             ru_clean = ru.strip()
-            grub_default = (
-                'GRUB_DEFAULT=0\n'
-                'GRUB_TIMEOUT=5\n'
-                'GRUB_DISTRIBUTOR="RIDOS OS"\n'
-                f'GRUB_CMDLINE_LINUX_DEFAULT='
-                f'"quiet splash"\n'
-                f'GRUB_CMDLINE_LINUX=""\n'
-                'GRUB_DISABLE_OS_PROBER=true\n'
-            )
+
+            # Step A: Find exact kernel + initrd filenames
+            self._log("  Finding kernel files...")
+            kern_out, _ = run_cmd(
+                f"ls {tgt}/boot/vmlinuz-* 2>/dev/null "
+                f"| sort -V | tail -1")
+            init_out, _ = run_cmd(
+                f"ls {tgt}/boot/initrd.img-* 2>/dev/null "
+                f"| sort -V | tail -1")
+            kern_file = os.path.basename(
+                kern_out.strip()) if kern_out.strip() else ""
+            init_file = os.path.basename(
+                init_out.strip()) if init_out.strip() else ""
+            self._log(f"  Kernel:  {kern_file or 'NOT FOUND'}")
+            self._log(f"  Initrd:  {init_file or 'NOT FOUND'}")
+
+            # Step B: Fix /etc/default/grub
+            self._log("  Fixing /etc/default/grub...")
             with open(f"{tgt}/etc/default/grub", 'w') as fh:
-                fh.write(grub_default)
+                fh.write(
+                    'GRUB_DEFAULT=0\n'
+                    'GRUB_TIMEOUT=5\n'
+                    'GRUB_DISTRIBUTOR="RIDOS OS"\n'
+                    'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n'
+                    'GRUB_CMDLINE_LINUX=""\n'
+                    'GRUB_DISABLE_OS_PROBER=true\n')
             self._log("  /etc/default/grub: OK")
 
-            # Step B: grub-install inside chroot
-            # NO --boot-directory - chroot handles the path
-            self._log(f"  Running grub-install on {disk}...")
+            # Step C: grub-install with explicit prefix
+            # This is the key fix - sets correct prefix in MBR
+            self._log(f"  grub-install on {disk}...")
             out, code = run_cmd(
                 f"chroot {tgt} grub-install "
                 f"--target=i386-pc "
+                f"--boot-directory=/boot "
+                f"--prefix=/boot/grub "
                 f"--recheck "
                 f"--force "
                 f"--no-floppy "
@@ -1458,82 +1471,73 @@ class RIDOSInstaller:
                 f"  grub-install: "
                 f"{'OK' if code==0 else out[-200:]}")
 
-            # Step C: Find exact kernel and initrd filenames
-            self._log("  Finding kernel files...")
-            kern_out, _ = run_cmd(
-                f"ls {tgt}/boot/vmlinuz-* 2>/dev/null "
-                f"| sort -V | tail -1")
-            init_out, _ = run_cmd(
-                f"ls {tgt}/boot/initrd.img-* 2>/dev/null "
-                f"| sort -V | tail -1")
-
-            kern_file = os.path.basename(
-                kern_out.strip()) if kern_out.strip() else ""
-            init_file = os.path.basename(
-                init_out.strip()) if init_out.strip() else ""
-
-            self._log(f"  Kernel:  {kern_file}")
-            self._log(f"  Initrd:  {init_file}")
-
-            # Step D: Write grub.cfg with EXACT filenames
-            # GRUB does not support shell wildcards!
+            # Step D: Write grub.cfg directly
+            # Use BOTH uuid search AND direct partition reference
+            # This is what the proven manual fix does:
+            # set root=(hd0,gpt3) + set prefix=(hd0,gpt3)/boot/grub
+            self._log("  Writing grub.cfg...")
             os.makedirs(f"{tgt}/boot/grub", exist_ok=True)
 
-            if kern_file and init_file:
-                grub_cfg = (
-                    'set default=0\n'
-                    'set timeout=5\n'
-                    'insmod part_gpt\n'
-                    'insmod ext2\n'
-                    'insmod gzio\n'
-                    '\n'
-                    'menuentry "RIDOS OS v1.0 Baghdad" {\n'
-                    f'  search --no-floppy '
-                    f'--fs-uuid --set=root {ru_clean}\n'
-                    f'  linux /boot/{kern_file} '
-                    f'root=UUID={ru_clean} '
-                    f'ro quiet splash\n'
-                    f'  initrd /boot/{init_file}\n'
-                    '}\n'
-                    '\n'
-                    'menuentry "RIDOS OS (recovery)" {\n'
-                    f'  search --no-floppy '
-                    f'--fs-uuid --set=root {ru_clean}\n'
-                    f'  linux /boot/{kern_file} '
-                    f'root=UUID={ru_clean} '
-                    f'ro single\n'
-                    f'  initrd /boot/{init_file}\n'
-                    '}\n'
-                )
-                with open(
-                        f"{tgt}/boot/grub/grub.cfg",
-                        'w') as fh:
-                    fh.write(grub_cfg)
-                self._log("  grub.cfg written with "
-                          "exact filenames: OK")
-            else:
-                # Also try update-grub as backup
-                self._log(
-                    "  Kernel not found, "
-                    "trying update-grub...")
-                run_cmd(
-                    f"chroot {tgt} update-grub 2>&1",
-                    60)
+            # Determine partition number of root (usually 3)
+            root_part_num = ''.join(
+                filter(str.isdigit,
+                       os.path.basename(root)))
+            if not root_part_num:
+                root_part_num = '3'
 
-            # Step E: verify grub.cfg exists and has content
-            cfg_path = f"{tgt}/boot/grub/grub.cfg"
-            if os.path.exists(cfg_path):
-                size = os.path.getsize(cfg_path)
+            # Determine disk number (hd0 for first disk)
+            disk_num = '0'
+
+            grub_cfg = f"""set default=0
+set timeout=5
+
+insmod part_gpt
+insmod ext2
+insmod gzio
+
+# Direct partition reference (most reliable)
+set root=(hd{disk_num},gpt{root_part_num})
+
+menuentry "RIDOS OS v1.0 Baghdad" {{
+  set root=(hd{disk_num},gpt{root_part_num})
+  linux /boot/{kern_file} root=UUID={ru_clean} ro quiet splash
+  initrd /boot/{init_file}
+}}
+
+menuentry "RIDOS OS (recovery mode)" {{
+  set root=(hd{disk_num},gpt{root_part_num})
+  linux /boot/{kern_file} root=UUID={ru_clean} ro single
+  initrd /boot/{init_file}
+}}
+"""
+            with open(f"{tgt}/boot/grub/grub.cfg", 'w') as fh:
+                fh.write(grub_cfg)
+
+            # Step E: Also run update-grub to regenerate
+            self._log("  Running update-grub...")
+            out2, code2 = run_cmd(
+                f"chroot {tgt} update-grub 2>&1", 60)
+            self._log(
+                f"  update-grub: "
+                f"{'OK' if code2==0 else out2[-100:]}")
+
+            # Step F: Verify grub.cfg has correct content
+            cfg = f"{tgt}/boot/grub/grub.cfg"
+            if os.path.exists(cfg):
+                cfg_content = open(cfg).read()
+                has_kernel = kern_file in cfg_content
+                has_uuid   = ru_clean in cfg_content
                 self._log(
-                    f"  grub.cfg: {size} bytes - OK")
-                # Show first 3 lines for verification
-                with open(cfg_path) as fh:
-                    preview = '\n    '.join(
-                        fh.read().split('\n')[:3])
-                self._log(f"  Preview: {preview}")
+                    f"  grub.cfg: {os.path.getsize(cfg)}b "
+                    f"kernel={'OK' if has_kernel else 'MISSING'} "
+                    f"uuid={'OK' if has_uuid else 'MISSING'}")
+                # Show key lines
+                for line in cfg_content.split('\n'):
+                    if ('linux ' in line or
+                            'set root' in line):
+                        self._log(f"    {line.strip()}")
             else:
-                self._log(
-                    "  WARNING: grub.cfg not found!")
+                self._log("  ERROR: grub.cfg missing!")
 
             # ── Cleanup ───────────────────────────────────
             self._log("  Unmounting...")
