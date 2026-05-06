@@ -24,6 +24,11 @@ jobs:
             debootstrap squashfs-tools xorriso \
             grub-pc-bin grub-efi-amd64-bin grub2-common \
             mtools dosfstools gnupg2 curl wget \
+            imagemagick librsvg2-bin unsquashfs 2>/dev/null || \
+          sudo apt-get install -y \
+            debootstrap squashfs-tools xorriso \
+            grub-pc-bin grub-efi-amd64-bin grub2-common \
+            mtools dosfstools gnupg2 curl wget \
             imagemagick librsvg2-bin
           echo "Build deps ready"
 
@@ -171,7 +176,8 @@ jobs:
             git vim nano curl wget \
             zip unzip p7zip-full \
             parted gparted rsync dosfstools \
-            squashfs-tools
+            squashfs-tools e2fsprogs xfsprogs \
+            udevadm 2>/dev/null || true
           echo "Pro IT tools installed"
 
       # ─────────────────────────────────────────────────────────
@@ -272,8 +278,11 @@ jobs:
       # ─────────────────────────────────────────────────────────
       - name: Build squashfs
         run: |
+          # NOTE: NO -e boot flag!
+          # The installer (unsquashfs) needs /boot/vmlinuz
+          # inside the squashfs to install the kernel on HDD
           sudo mksquashfs chroot filesystem.squashfs \
-            -comp xz -e boot -noappend
+            -comp xz -noappend
           sudo chmod 644 filesystem.squashfs
           sudo chown root:root filesystem.squashfs
           echo "squashfs: $(du -sh filesystem.squashfs | cut -f1)"
