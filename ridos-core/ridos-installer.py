@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-RIDOS OS Installer - Disk Manager + OS Installer
-Tkinter UI — proven to work with sudo in XFCE
-Run: sudo python3 /opt/ridos/bin/ridos-installer.py
+RIDOS OS Installer v1.0 Baghdad
+Proven 12-step installation method
+12-step installation — GTK3/Tkinter — No Calamares
 """
 # ── Fix DISPLAY before any import ────────────────────────────
 import os, sys, subprocess
 
 os.environ.setdefault('DISPLAY', ':0')
-_sudo_user = os.environ.get('SUDO_USER', 'ridos')
+_su = os.environ.get('SUDO_USER', 'ridos')
 if not os.environ.get('XAUTHORITY'):
-    for _xa in [f'/home/{_sudo_user}/.Xauthority',
+    for _xa in [f'/home/{_su}/.Xauthority',
                 '/home/ridos/.Xauthority',
                 '/root/.Xauthority']:
         if os.path.exists(_xa):
@@ -23,7 +23,6 @@ if os.geteuid() != 0:
                        os.path.abspath(__file__)])
     sys.exit()
 
-# ── Tkinter ───────────────────────────────────────────────────
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, simpledialog
@@ -31,222 +30,174 @@ except ImportError:
     print("ERROR: python3-tk missing")
     sys.exit(1)
 
-import threading, json, time, shutil
+import threading, glob, shutil, re
 
 # ── Colors ────────────────────────────────────────────────────
-BG     = "#0F0A1E"
-BG2    = "#1E1B4B"
-BG3    = "#2D1B69"
-PURPLE = "#7C3AED"
-TEXT   = "#E9D5FF"
-GREEN  = "#10B981"
-YELLOW = "#F59E0B"
-RED    = "#EF4444"
-CYAN   = "#06B6D4"
-GRAY   = "#6B7280"
+BG=     "#0F0A1E"
+BG2=    "#1E1B4B"
+BG3=    "#2D1B69"
+PURPLE= "#7C3AED"
+TEXT=   "#E9D5FF"
+GREEN=  "#10B981"
+YELLOW= "#F59E0B"
+RED=    "#EF4444"
+CYAN=   "#06B6D4"
+GRAY=   "#6B7280"
 
-# ── Helpers ───────────────────────────────────────────────────
-def run_cmd(cmd, timeout=600):
-    try:
-        r = subprocess.run(cmd, shell=True,
-                           capture_output=True,
-                           text=True, timeout=timeout)
-        return (r.stdout + r.stderr).strip(), r.returncode
-    except subprocess.TimeoutExpired:
-        return "Timed out", 1
-    except Exception as e:
-        return str(e), 1
+MNT = "/mnt/ridos_target"
+
+# ════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS
+# ════════════════════════════════════════════════════════════════
+
+def sh(cmd, inp=None, timeout=600):
+    r = subprocess.run(cmd, shell=True, capture_output=True,
+                       text=True, timeout=timeout, input=inp)
+    return r.stdout.strip(), r.stderr.strip(), r.returncode
+
+def sh_log(cmd, log_fn, timeout=3600):
+    p = subprocess.Popen(cmd, shell=True,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True)
+    for line in p.stdout:
+        log_fn(line.rstrip())
+    p.wait()
+    return p.returncode
+
+def is_efi():
+    return os.path.exists('/sys/firmware/efi')
 
 def get_disks():
     disks = []
-
-    # Method 1: lsblk JSON (most reliable)
-    out, code = run_cmd(
-        "lsblk -d -b -J -o NAME,SIZE,MODEL,TYPE "
-        "2>/dev/null")
-    if code == 0 and out.strip():
+    # Method 1: lsblk JSON
+    out, _, rc = sh("lsblk -d -b -J -o NAME,SIZE,MODEL,TYPE 2>/dev/null")
+    if rc == 0 and out:
         try:
-            import json as _json
-            data = _json.loads(out)
-            for d in data.get('blockdevices', []):
+            import json
+            for d in json.loads(out).get('blockdevices', []):
                 if d.get('type') != 'disk': continue
                 name = d.get('name', '')
-                if 'loop' in name or 'ram' in name:
-                    continue
-                try:
-                    size_gb = int(d.get('size', 0)) / 1024**3
-                except:
-                    size_gb = 0
+                if 'loop' in name or 'ram' in name: continue
+                try: gb = int(d.get('size', 0)) / 1024**3
+                except: gb = 0
                 model = (d.get('model') or '').strip()
-                disks.append({
-                    'name':  name,
-                    'path':  f'/dev/{name}',
-                    'size':  f'{size_gb:.1f} GB',
-                    'model': model or 'Unknown',
-                })
-            if disks:
-                return disks
-        except Exception:
-            pass
-
-    # Method 2: lsblk text - TYPE is LAST column
-    out, code = run_cmd(
-        "lsblk -d -b -o NAME,SIZE,MODEL,TYPE -n "
-        "2>/dev/null")
-    if code == 0 and out.strip():
-        for line in out.strip().split('\n'):
-            parts = line.split()
-            if len(parts) < 2: continue
-            name  = parts[0]
-            if 'loop' in name or 'ram' in name: continue
-            size  = parts[1]
-            # TYPE is always the LAST column
-            dtype = parts[-1].strip()
-            # MODEL is all columns between SIZE and TYPE
-            model = ' '.join(parts[2:-1]).strip()                     if len(parts) > 3 else ''
-            if dtype != 'disk': continue
-            try:
-                size_gb = int(size) / 1024**3
-            except:
-                size_gb = 0
-            disks.append({
-                'name':  name,
-                'path':  f'/dev/{name}',
-                'size':  f'{size_gb:.1f} GB',
-                'model': model or 'Unknown',
-            })
-        if disks:
-            return disks
-
-    # Method 3: /proc/partitions fallback
-    out, code = run_cmd("cat /proc/partitions 2>/dev/null")
-    if code == 0:
-        for line in out.strip().split('\n')[2:]:
-            parts = line.split()
-            if len(parts) < 4: continue
-            major, minor, blocks, name = parts[:4]
-            if 'loop' in name or 'ram' in name: continue
-            # Only whole disks (no digits at end for SATA,
-            # no p+digit for NVMe)
-            import re as _re
-            if _re.search(r'\d$', name) and                not _re.search(r'[a-z]\d*$', name): continue
-            if _re.search(r'p\d+$', name): continue
-            try:
-                size_gb = int(blocks) * 1024 / 1024**3
-            except:
-                size_gb = 0
-            disks.append({
-                'name':  name,
-                'path':  f'/dev/{name}',
-                'size':  f'{size_gb:.1f} GB',
-                'model': 'Unknown',
-            })
-
+                disks.append((f'/dev/{name}',
+                               f'{model} [{gb:.1f} GB]', gb))
+            if disks: return disks
+        except: pass
+    # Method 2: lsblk text (TYPE is last column)
+    out, _, _ = sh("lsblk -d -b -o NAME,SIZE,MODEL,TYPE -n 2>/dev/null")
+    for line in out.split('\n'):
+        parts = line.split()
+        if len(parts) < 2: continue
+        name = parts[0]
+        if 'loop' in name or 'ram' in name: continue
+        size = parts[1]
+        dtype = parts[-1].strip()
+        model = ' '.join(parts[2:-1]).strip() if len(parts) > 3 else ''
+        if dtype != 'disk': continue
+        try: gb = int(size) / 1024**3
+        except: gb = 0
+        disks.append((f'/dev/{name}', f'{model} [{gb:.1f} GB]', gb))
+    if disks: return disks
+    # Method 3: /proc/partitions
+    out, _, _ = sh("cat /proc/partitions 2>/dev/null")
+    for line in out.split('\n')[2:]:
+        parts = line.split()
+        if len(parts) < 4: continue
+        name = parts[3]
+        if 'loop' in name or 'ram' in name: continue
+        if re.search(r'\d$', name): continue
+        try: gb = int(parts[2]) * 1024 / 1024**3
+        except: gb = 0
+        disks.append((f'/dev/{name}', f'[{gb:.1f} GB]', gb))
     return disks
 
-def get_partitions(disk_path):
+def get_partitions(disk):
     parts = []
-    disk_name = os.path.basename(disk_path)
-
-    # Method 1: lsblk JSON
-    out, code = run_cmd(
-        f"lsblk -b -J -o NAME,SIZE,FSTYPE,MOUNTPOINT "
-        f"{disk_path} 2>/dev/null")
-    if code == 0 and out.strip():
+    disk_name = os.path.basename(disk)
+    # Method 1: JSON
+    out, _, rc = sh(f"lsblk -b -J -o NAME,SIZE,FSTYPE,MOUNTPOINT {disk} 2>/dev/null")
+    if rc == 0 and out:
         try:
-            import json as _json
-            data = _json.loads(out)
-            devs = data.get('blockdevices', [])
-            children = []
-            for d in devs:
-                children += d.get('children', [])
-            for c in children:
-                name = c.get('name', '')
-                if not name: continue
-                try:
-                    size_gb = int(c.get('size', 0))                               / 1024**3
-                except:
-                    size_gb = 0
-                parts.append({
-                    'name':   name,
-                    'path':   f'/dev/{name}',
-                    'size':   f'{size_gb:.2f} GB',
-                    'fstype': c.get('fstype') or '',
-                    'mount':  c.get('mountpoint') or '',
-                })
-            if parts:
-                return parts
-        except Exception:
-            pass
-
-    # Method 2: lsblk text
-    out, _ = run_cmd(
-        f"lsblk -b -o NAME,SIZE,FSTYPE,MOUNTPOINT -n "
-        f"-P {disk_path} 2>/dev/null")
-    if out.strip():
-        import re as _re
-        for line in out.strip().split('\n'):
-            if not line.strip(): continue
-            kv = dict(_re.findall(
-                r'(\w+)="([^"]*)"', line))
-            name = kv.get('NAME', '').strip()
-            if not name or name == disk_name: continue
-            try:
-                size_gb = int(kv.get('SIZE', '0'))                           / 1024**3
-            except:
-                size_gb = 0
-            parts.append({
-                'name':   name,
-                'path':   f'/dev/{name}',
-                'size':   f'{size_gb:.2f} GB',
-                'fstype': kv.get('FSTYPE', ''),
-                'mount':  kv.get('MOUNTPOINT', ''),
-            })
-
+            import json
+            for d in json.loads(out).get('blockdevices', []):
+                for c in d.get('children', []):
+                    name = c.get('name', '')
+                    if not name: continue
+                    try: gb = int(c.get('size', 0)) / 1024**3
+                    except: gb = 0
+                    parts.append({'name': name, 'path': f'/dev/{name}',
+                                  'size': f'{gb:.2f} GB',
+                                  'fstype': c.get('fstype') or '',
+                                  'mount': c.get('mountpoint') or ''})
+            if parts: return parts
+        except: pass
+    # Method 2: key=value
+    out, _, _ = sh(f"lsblk -b -o NAME,SIZE,FSTYPE,MOUNTPOINT -n -P {disk} 2>/dev/null")
+    for line in out.split('\n'):
+        if not line.strip(): continue
+        kv = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        name = kv.get('NAME', '').strip()
+        if not name or name == disk_name: continue
+        try: gb = int(kv.get('SIZE', '0')) / 1024**3
+        except: gb = 0
+        parts.append({'name': name, 'path': f'/dev/{name}',
+                      'size': f'{gb:.2f} GB',
+                      'fstype': kv.get('FSTYPE', ''),
+                      'mount': kv.get('MOUNTPOINT', '')})
     return parts
 
 def find_squashfs():
-    for p in [
-        '/run/live/medium/live/filesystem.squashfs',
-        '/lib/live/mount/medium/live/filesystem.squashfs',
-        '/cdrom/live/filesystem.squashfs',
-    ]:
-        if os.path.exists(p):
-            return p
-    out, _ = run_cmd(
-        "find /run /lib/live /cdrom /media "
-        "-name 'filesystem.squashfs' 2>/dev/null | head -1")
+    for p in ['/run/live/medium/live/filesystem.squashfs',
+              '/lib/live/mount/medium/live/filesystem.squashfs',
+              '/run/initramfs/live/filesystem.squashfs',
+              '/cdrom/live/filesystem.squashfs']:
+        if os.path.exists(p): return p
+    out, _, _ = sh("mount | grep iso9660 | awk '{print $3}'")
+    for mp in out.split('\n'):
+        p = f"{mp.strip()}/live/filesystem.squashfs"
+        if os.path.exists(p): return p
+    out, _, _ = sh("find /run /cdrom /media /lib/live -name 'filesystem.squashfs' 2>/dev/null | head -1")
     return out.strip() if out.strip() else None
 
-def disk_size_gb(disk_path):
-    out, _ = run_cmd(
-        f"lsblk -d -b -o SIZE -n {disk_path} 2>/dev/null")
-    try:
-        return int(out.strip()) / 1024**3
-    except:
-        return 0
+def write_minimal_grub_cfg(mnt, root_uuid, kern_path, init_path):
+    """Write grub.cfg with exact kernel filename — proven fix"""
+    os.makedirs(f"{mnt}/boot/grub", exist_ok=True)
+    with open(f"{mnt}/boot/grub/grub.cfg", 'w') as f:
+        f.write(f"""set default=0
+set timeout=5
 
-def part_size_gb(part_path):
-    out, _ = run_cmd(
-        f"lsblk -b -o SIZE -n {part_path} 2>/dev/null")
-    try:
-        return int(out.strip().split('\n')[-1]) / 1024**3
-    except:
-        return 0
+insmod part_gpt
+insmod part_msdos
+insmod ext2
+insmod gzio
 
+menuentry "RIDOS OS v1.0 Baghdad" {{
+  search --no-floppy --fs-uuid --set=root {root_uuid}
+  linux   {kern_path} root=UUID={root_uuid} ro quiet splash
+  initrd  {init_path}
+}}
+
+menuentry "RIDOS OS (recovery)" {{
+  search --no-floppy --fs-uuid --set=root {root_uuid}
+  linux   {kern_path} root=UUID={root_uuid} ro single
+  initrd  {init_path}
+}}
+""")
 
 # ════════════════════════════════════════════════════════════════
 class RIDOSInstaller:
-
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("RIDOS OS — Disk Manager & Installer")
+        self.root.title("RIDOS OS Installer v1.0 Baghdad")
         self.root.geometry("1020x680")
         self.root.configure(bg=BG)
         self.root.resizable(True, True)
         self._disks = []
-        self.selected_disk = None
-        self.selected_part = None
+        self._sel_disk = None
+        self._sel_part = None
+        self._efi = is_efi()
         self.install_data = {
             'disk': None, 'username': 'ridos',
             'password': 'ridos', 'hostname': 'ridos-os',
@@ -254,1370 +205,861 @@ class RIDOSInstaller:
         }
         self._build_ui()
 
-    # ── Layout ─────────────────────────────────────────────────
     def _build_ui(self):
         hdr = tk.Frame(self.root, bg=BG2, pady=10)
         hdr.pack(fill='x')
-        tk.Label(hdr, text="RIDOS OS",
-                 font=('Arial', 20, 'bold'),
+        tk.Label(hdr, text="RIDOS OS", font=('Arial', 20, 'bold'),
                  bg=BG2, fg=PURPLE).pack(side='left', padx=16)
-        tk.Label(hdr, text="Disk Manager & Installer v1.0",
+        mode = "UEFI" if self._efi else "BIOS"
+        tk.Label(hdr, text=f"Installer v1.0  |  {mode} mode",
                  font=('Arial', 11), bg=BG2, fg=TEXT).pack(side='left')
-
         body = tk.Frame(self.root, bg=BG)
         body.pack(fill='both', expand=True)
-
-        sidebar = tk.Frame(body, bg=BG2, width=155)
-        sidebar.pack(side='left', fill='y')
-        sidebar.pack_propagate(False)
-
-        tk.Label(sidebar, text="MENU",
-                 font=('Arial', 9, 'bold'),
+        sb = tk.Frame(body, bg=BG2, width=155)
+        sb.pack(side='left', fill='y')
+        sb.pack_propagate(False)
+        tk.Label(sb, text="MENU", font=('Arial', 9, 'bold'),
                  bg=BG2, fg=GRAY).pack(pady=(16, 4))
-
         self._nav_btns = {}
-        for key, label in [('disks',   '  Disk Manager'),
-                            ('install', '  Install OS'),
-                            ('about',   '  About')]:
-            b = tk.Button(sidebar, text=label,
-                          font=('Arial', 11), anchor='w',
+        for key, lbl in [('disks','  Disk Manager'),
+                          ('install','  Install OS'),
+                          ('about','  About')]:
+            b = tk.Button(sb, text=lbl, font=('Arial', 11), anchor='w',
                           bg=BG2, fg=TEXT, relief='flat',
-                          activebackground=BG3,
-                          cursor='hand2',
+                          activebackground=BG3, cursor='hand2',
                           command=lambda k=key: self._nav(k))
             b.pack(fill='x', pady=2, padx=4)
             self._nav_btns[key] = b
-
-        tk.Frame(body, bg='#2D1B69', width=1).pack(
-            side='left', fill='y')
-
+        tk.Frame(body, bg='#2D1B69', width=1).pack(side='left', fill='y')
         self.content = tk.Frame(body, bg=BG)
         self.content.pack(side='left', fill='both', expand=True)
-
         self._nav('disks')
 
     def _nav(self, page):
         for k, b in self._nav_btns.items():
-            b.config(bg=BG3 if k == page else BG2,
-                     fg=TEXT if k == page else GRAY)
+            b.config(bg=BG3 if k==page else BG2,
+                     fg=TEXT if k==page else GRAY)
         for w in self.content.winfo_children():
             w.destroy()
-        {'disks':   self._page_disks,
+        {'disks': self._page_disks,
          'install': self._page_install,
-         'about':   self._page_about}[page]()
+         'about': self._page_about}[page]()
 
-    def _btn(self, parent, text, cmd,
-             color=PURPLE, fg=TEXT, **kw):
-        return tk.Button(
-            parent, text=text, command=cmd,
-            bg=color, fg=fg,
-            font=('Arial', 9, 'bold'),
-            relief='flat', padx=8, pady=4,
-            cursor='hand2', **kw)
+    def _btn(self, parent, text, cmd, color=PURPLE, fg=TEXT, **kw):
+        return tk.Button(parent, text=text, command=cmd,
+                         bg=color, fg=fg, font=('Arial', 9, 'bold'),
+                         relief='flat', padx=8, pady=4, cursor='hand2', **kw)
 
-    # ═══════════════════════════════════════════════════════════
-    # PAGE: Disk Manager
-    # ═══════════════════════════════════════════════════════════
+    # ─── DISK MANAGER ─────────────────────────────────────────
     def _page_disks(self):
         top = tk.Frame(self.content, bg=BG2, pady=8)
         top.pack(fill='x')
-        tk.Label(top, text="Disk Manager",
-                 font=('Arial', 14, 'bold'),
+        tk.Label(top, text="Disk Manager", font=('Arial', 14, 'bold'),
                  bg=BG2, fg=PURPLE).pack(side='left', padx=14)
-        self._btn(top, "⟳ Refresh",
-                  self._refresh_disks, BG3).pack(
-                      side='right', padx=8)
-
+        self._btn(top, "⟳ Refresh", self._refresh_disks, BG3).pack(side='right', padx=8)
         pane = tk.Frame(self.content, bg=BG)
         pane.pack(fill='both', expand=True, padx=8, pady=6)
-
-        # ── Left: disk list ───────────────────────────────────
         left = tk.Frame(pane, bg=BG, width=260)
-        left.pack(side='left', fill='y', padx=(0, 6))
+        left.pack(side='left', fill='y', padx=(0,6))
         left.pack_propagate(False)
-
-        tk.Label(left, text="Storage Devices",
-                 font=('Arial', 10, 'bold'),
+        tk.Label(left, text="Storage Devices", font=('Arial', 10, 'bold'),
                  bg=BG, fg=TEXT).pack(anchor='w')
-
-        self.disk_listbox = tk.Listbox(
-            left, bg=BG2, fg=TEXT,
-            selectbackground=PURPLE,
-            font=('Courier', 10),
-            relief='flat', width=30, height=12,
-            activestyle='none')
-        self.disk_listbox.pack(fill='both', expand=True,
-                               pady=4)
-        self.disk_listbox.bind(
-            '<<ListboxSelect>>', self._on_disk_select)
-
-        # Disk buttons
-        dbf = tk.Frame(left, bg=BG)
-        dbf.pack(fill='x', pady=2)
-        self._btn(dbf, "New GPT Table",
-                  self._new_part_table,
-                  BG3).grid(row=0, column=0, padx=2, pady=2)
-        self._btn(dbf, "Format Disk",
-                  self._format_disk,
-                  RED).grid(row=0, column=1, padx=2, pady=2)
-
-        # ── Right: partition table ────────────────────────────
+        self.disk_lb = tk.Listbox(left, bg=BG2, fg=TEXT,
+                                   selectbackground=PURPLE,
+                                   font=('Courier', 10), relief='flat',
+                                   width=30, height=12, activestyle='none')
+        self.disk_lb.pack(fill='both', expand=True, pady=4)
+        self.disk_lb.bind('<<ListboxSelect>>', self._on_disk_sel)
+        dbf = tk.Frame(left, bg=BG); dbf.pack(fill='x', pady=2)
+        self._btn(dbf,"New GPT",self._new_part_table,BG3).grid(row=0,column=0,padx=2,pady=2)
+        self._btn(dbf,"Format Disk",self._format_disk,RED).grid(row=0,column=1,padx=2,pady=2)
         right = tk.Frame(pane, bg=BG)
         right.pack(side='left', fill='both', expand=True)
-
-        tk.Label(right, text="Partitions",
-                 font=('Arial', 10, 'bold'),
+        tk.Label(right, text="Partitions", font=('Arial', 10, 'bold'),
                  bg=BG, fg=TEXT).pack(anchor='w')
-
-        cols = ('Device', 'Size', 'FS', 'Mount', 'Flags')
-        self.part_tree = ttk.Treeview(
-            right, columns=cols,
-            show='headings', height=11)
-        style = ttk.Style()
-        style.theme_use('default')
-        style.configure('Treeview',
-                        background=BG2, foreground=TEXT,
-                        fieldbackground=BG2, rowheight=22)
-        style.configure('Treeview.Heading',
-                        background=BG3, foreground=CYAN,
-                        font=('Arial', 9, 'bold'))
-        style.map('Treeview',
-                  background=[('selected', PURPLE)])
-        widths = {'Device': 110, 'Size': 85,
-                  'FS': 80, 'Mount': 130, 'Flags': 80}
-        for col in cols:
+        cols = ('Device','Size','FS','Mount','Flags')
+        self.part_tree = ttk.Treeview(right, columns=cols,
+                                       show='headings', height=11)
+        sty = ttk.Style(); sty.theme_use('default')
+        sty.configure('Treeview', background=BG2, foreground=TEXT,
+                       fieldbackground=BG2, rowheight=22)
+        sty.configure('Treeview.Heading', background=BG3,
+                       foreground=CYAN, font=('Arial', 9, 'bold'))
+        sty.map('Treeview', background=[('selected', PURPLE)])
+        for col, w in zip(cols, [110,85,80,130,80]):
             self.part_tree.heading(col, text=col)
-            self.part_tree.column(col,
-                                  width=widths[col],
-                                  anchor='w')
-        self.part_tree.pack(fill='both', expand=True,
-                            pady=4)
-        self.part_tree.bind(
-            '<<TreeviewSelect>>', self._on_part_select)
-
-        # Partition buttons — full set
-        pbf = tk.Frame(right, bg=BG)
-        pbf.pack(fill='x', pady=2)
-        buttons = [
-            ("+ EXT4",    self._create_ext4,  PURPLE, 0, 0),
-            ("+ Swap",    self._create_swap,  BG3,    0, 1),
-            ("Set Boot",  self._set_boot_flag, GREEN, 0, 2),
-            ("Set Active",self._set_active,   GREEN,  0, 3),
-            ("Resize",    self._resize_part,  CYAN,   1, 0),
-            ("Format",    self._format_part,  YELLOW, 1, 1),
-            ("Delete",    self._delete_part,  RED,    1, 2),
-            ("Mount",     self._toggle_mount, BG3,    1, 3),
-        ]
-        for text, cmd, color, row, col in buttons:
-            self._btn(pbf, text, cmd, color).grid(
-                row=row, column=col,
-                padx=2, pady=2, sticky='ew')
-
-        # Status bar
-        self.disk_status = tk.Label(
-            self.content,
-            text="Select a disk to see partitions",
-            font=('Arial', 9), bg=BG2, fg=GRAY,
-            anchor='w', pady=3)
-        self.disk_status.pack(fill='x', padx=8,
-                              pady=(0, 4))
-
+            self.part_tree.column(col, width=w, anchor='w')
+        self.part_tree.pack(fill='both', expand=True, pady=4)
+        self.part_tree.bind('<<TreeviewSelect>>', self._on_part_sel)
+        pbf = tk.Frame(right, bg=BG); pbf.pack(fill='x', pady=2)
+        for txt,cmd,color,row,col in [
+            ("+ EXT4",self._create_ext4,PURPLE,0,0),
+            ("+ Swap",self._create_swap,BG3,0,1),
+            ("Set Boot",self._set_boot,GREEN,0,2),
+            ("Set Active",self._set_active,GREEN,0,3),
+            ("Resize",self._resize_part,CYAN,1,0),
+            ("Format",self._format_part,YELLOW,1,1),
+            ("Delete",self._delete_part,RED,1,2),
+            ("Mount",self._toggle_mount,BG3,1,3),
+        ]:
+            self._btn(pbf,txt,cmd,color).grid(row=row,column=col,padx=2,pady=2,sticky='ew')
+        self.disk_status = tk.Label(self.content, text="Select a disk",
+                                     font=('Arial',9), bg=BG2, fg=GRAY,
+                                     anchor='w', pady=3)
+        self.disk_status.pack(fill='x', padx=8, pady=(0,4))
         self._refresh_disks()
 
     def _refresh_disks(self):
         self._disks = get_disks()
-        self.disk_listbox.delete(0, 'end')
+        self.disk_lb.delete(0, 'end')
         if not self._disks:
-            self.disk_listbox.insert('end',
-                                     '  No disks found')
-            return
-        for d in self._disks:
-            self.disk_listbox.insert(
-                'end',
-                f"  /dev/{d['name']}  "
-                f"{d['size']:>8}  "
-                f"{d['model'][:12]}")
+            self.disk_lb.insert('end', '  No disks found'); return
+        for path, label, gb in self._disks:
+            self.disk_lb.insert('end', f"  {path}  {label}")
 
-    def _on_disk_select(self, event):
-        sel = self.disk_listbox.curselection()
-        if not sel: return
-        idx = sel[0]
-        if idx >= len(self._disks): return
-        self.selected_disk = self._disks[idx]
-        self.install_data['disk'] = self.selected_disk['path']
+    def _on_disk_sel(self, event):
+        sel = self.disk_lb.curselection()
+        if not sel or sel[0] >= len(self._disks): return
+        self._sel_disk = self._disks[sel[0]][0]
+        self.install_data['disk'] = self._sel_disk
         self.disk_status.config(
-            text=f"  {self.selected_disk['path']}  "
-                 f"{self.selected_disk['size']}  "
-                 f"{self.selected_disk['model']}")
+            text=f"  {self._disks[sel[0]][0]}  {self._disks[sel[0]][1]}")
         self._refresh_parts()
 
-    def _on_part_select(self, event):
+    def _on_part_sel(self, event):
         sel = self.part_tree.selection()
         if sel:
             vals = self.part_tree.item(sel[0], 'values')
-            if vals:
-                self.selected_part = vals[0]
+            if vals: self._sel_part = vals[0]
 
     def _refresh_parts(self):
-        for row in self.part_tree.get_children():
-            self.part_tree.delete(row)
-        if not self.selected_disk: return
-        disk = self.selected_disk['path']
-        parts = get_partitions(disk)
-
-        # Get flags from parted
-        flags_out, _ = run_cmd(
-            f"parted -s {disk} print 2>/dev/null")
+        for r in self.part_tree.get_children():
+            self.part_tree.delete(r)
+        if not self._sel_disk: return
+        parts = get_partitions(self._sel_disk)
+        flags_out, _, _ = sh(f"parted -s {self._sel_disk} print 2>/dev/null")
         flags_map = {}
         for line in flags_out.split('\n'):
-            parts_line = line.strip().split()
-            if parts_line and parts_line[0].isdigit():
-                num = parts_line[0]
-                flags = parts_line[-1] if len(
-                    parts_line) > 5 else ''
-                flags_map[num] = flags
-
+            toks = line.strip().split()
+            if toks and toks[0].isdigit():
+                flags_map[toks[0]] = toks[-1]
         if not parts:
-            self.part_tree.insert(
-                '', 'end',
-                values=('No partitions', '', '', '', ''))
-            return
-
+            self.part_tree.insert('','end',values=('No partitions','','','','')); return
         for i, p in enumerate(parts, 1):
-            flags = flags_map.get(str(i), '')
-            self.part_tree.insert(
-                '', 'end',
-                values=(
-                    f"/dev/{p['name']}",
-                    p['size'],
-                    p['fstype'] or '-',
-                    p['mount'] or '-',
-                    flags))
+            self.part_tree.insert('','end', values=(
+                f"/dev/{p['name']}", p['size'],
+                p['fstype'] or '-', p['mount'] or '-',
+                flags_map.get(str(i), '')))
 
-    def _require_disk(self):
-        if not self.selected_disk:
-            messagebox.showwarning(
-                "No disk", "Select a disk first")
-            return False
+    def _req_disk(self):
+        if not self._sel_disk:
+            messagebox.showwarning("","Select a disk first"); return False
         return True
 
-    def _require_part(self):
-        if not self.selected_part:
-            messagebox.showwarning(
-                "No partition",
-                "Select a partition from the list first")
-            return False
+    def _req_part(self):
+        if not self._sel_part:
+            messagebox.showwarning("","Select a partition first"); return False
         return True
 
-    # ── Disk operations ────────────────────────────────────────
     def _new_part_table(self):
-        if not self._require_disk(): return
-        disk = self.selected_disk['path']
-        if not messagebox.askyesno(
-                "Confirm",
-                f"Create new GPT table on {disk}?\n"
-                "ALL partitions will be deleted!"):
-            return
-        out, code = run_cmd(
-            f"parted -s {disk} mklabel gpt")
-        if code == 0:
-            messagebox.showinfo(
-                "Done", f"GPT table created on {disk}")
-        else:
-            messagebox.showerror("Failed", out)
+        if not self._req_disk(): return
+        if not messagebox.askyesno("Confirm",
+                f"New GPT table on {self._sel_disk}?\nErases all partitions!"): return
+        sh(f"parted -s {self._sel_disk} mklabel gpt")
         self._refresh_parts()
 
     def _format_disk(self):
-        if not self._require_disk(): return
-        disk = self.selected_disk['path']
-        if not messagebox.askyesno(
-                "⚠ WARNING",
-                f"ERASE ALL DATA on {disk}?\n"
-                "This cannot be undone!"):
-            return
-        cmds = [
-            f"parted -s {disk} mklabel gpt",
-            f"mkfs.ext4 -F {disk}",
-        ]
-        for cmd in cmds:
-            run_cmd(cmd, 60)
-        messagebox.showinfo(
-            "Done", f"Disk {disk} formatted")
+        if not self._req_disk(): return
+        if not messagebox.askyesno("⚠ WARNING",
+                f"ERASE ALL DATA on {self._sel_disk}?"): return
+        sh(f"parted -s {self._sel_disk} mklabel gpt")
+        messagebox.showinfo("Done","Disk formatted")
         self._refresh_parts()
 
-    # ── Partition operations ───────────────────────────────────
     def _create_ext4(self):
-        if not self._require_disk(): return
-        disk = self.selected_disk['path']
+        if not self._req_disk(): return
+        size = simpledialog.askstring("Size",
+            "Size in GB (empty=all free space):", parent=self.root)
+        if size is None: return
+        disk = self._sel_disk
         parts = get_partitions(disk)
-        # Find free space start
+        start = "1MiB" if not parts else "100%"
         if parts:
-            # Add after last partition
-            size = simpledialog.askstring(
-                "Size",
-                "Partition size in GB (e.g. 20)\n"
-                "Or leave empty to use all free space:",
-                parent=self.root)
-            if size is None: return
-            try:
-                size_gb = float(size) if size.strip() else 0
-            except:
-                size_gb = 0
-            out, _ = run_cmd(
-                f"parted -s {disk} print free 2>/dev/null")
-            # Get end of last partition
-            end_out, _ = run_cmd(
-                f"parted -s {disk} unit MiB print "
-                f"2>/dev/null | tail -4")
-            end = "100%"
-            for line in end_out.split('\n'):
-                if line.strip() and line.strip()[0].isdigit():
+            fp, _, _ = sh(f"parted -s {disk} unit MiB print free 2>/dev/null")
+            for line in reversed(fp.split('\n')):
+                if 'Free Space' in line:
                     toks = line.split()
-                    if len(toks) >= 3:
-                        end = toks[2]
-            start = end
-            if size_gb > 0:
-                start_mib = float(
-                    start.replace("MiB","").strip()
-                    .replace("%","") or "0")
-                end = f"{start_mib + size_gb*1024:.0f}MiB"
-            else:
-                end = "100%"
-        else:
-            start, end = "1MiB", "100%"
-
-        cmds = [
-            f"parted -s {disk} mkpart primary ext4 "
-            f"{start} {end}",
-            f"partprobe {disk}",
-            "sleep 1",
-        ]
-        for cmd in cmds:
-            run_cmd(cmd, 30)
-
-        # Format the new partition
-        parts_after = get_partitions(disk)
-        if parts_after:
-            new_part = parts_after[-1]['path']
-            out, code = run_cmd(
-                f"mkfs.ext4 -F {new_part}", 60)
-            if code == 0:
-                messagebox.showinfo(
-                    "Done",
-                    f"EXT4 partition {new_part} created")
-            else:
-                messagebox.showerror("Failed", out)
+                    if toks: start = toks[0]; break
+        end = "100%"
+        if size and size.strip():
+            try:
+                sz = float(size.strip())
+                s_mib = float(start.replace('MiB','') or '1')
+                end = f"{s_mib + sz*1024:.0f}MiB"
+            except: pass
+        sh(f"parted -s {disk} mkpart primary ext4 {start} {end}")
+        sh("partprobe 2>/dev/null || true")
+        sh("udevadm settle 2>/dev/null || true")
+        sh("sleep 2")
+        parts2 = get_partitions(disk)
+        if parts2:
+            new_p = parts2[-1]['path']
+            _, err, rc = sh(f"mkfs.ext4 -F -E lazy_itable_init=0,lazy_journal_init=0 {new_p}", timeout=120)
+            messagebox.showinfo("Done", f"EXT4: {new_p}" if rc==0 else f"Failed:\n{err}")
         self._refresh_parts()
 
     def _create_swap(self):
-        if not self._require_disk(): return
-        disk = self.selected_disk['path']
-        size = simpledialog.askstring(
-            "Swap size",
-            "Swap partition size in GB (e.g. 4):",
-            parent=self.root)
+        if not self._req_disk(): return
+        size = simpledialog.askstring("Swap","Size in GB:", parent=self.root)
         if not size: return
-        try:
-            size_gb = float(size)
-        except:
-            messagebox.showerror("Error", "Invalid size")
-            return
-        # Add after last partition
+        try: sz = float(size.strip())
+        except: messagebox.showerror("Error","Invalid"); return
+        disk = self._sel_disk
         parts = get_partitions(disk)
-        start = "1MiB" if not parts else "0%"
-        end   = f"{size_gb*1024:.0f}MiB"
-
-        run_cmd(
-            f"parted -s {disk} mkpart primary "
-            f"linux-swap {start} {end}", 30)
-        run_cmd(f"partprobe {disk}")
-        time.sleep(1)
-        parts_after = get_partitions(disk)
-        if parts_after:
-            new_part = parts_after[-1]['path']
-            run_cmd(f"mkswap {new_part}", 30)
-            messagebox.showinfo(
-                "Done",
-                f"Swap partition {new_part} created")
+        start = "1MiB" if not parts else "100%"
+        if parts:
+            fp, _, _ = sh(f"parted -s {disk} unit MiB print free 2>/dev/null")
+            for line in reversed(fp.split('\n')):
+                if 'Free Space' in line:
+                    toks = line.split()
+                    if toks: start = toks[0]; break
+        s_mib = float(start.replace('MiB','') or '1')
+        end = f"{s_mib + sz*1024:.0f}MiB"
+        sh(f"parted -s {disk} mkpart primary linux-swap {start} {end}")
+        sh("partprobe 2>/dev/null || true")
+        sh("udevadm settle 2>/dev/null || true"); sh("sleep 2")
+        parts2 = get_partitions(disk)
+        if parts2:
+            new_p = parts2[-1]['path']
+            sh(f"mkswap {new_p}")
+            messagebox.showinfo("Done", f"Swap: {new_p}")
         self._refresh_parts()
 
-    def _set_boot_flag(self):
-        """Set boot flag on selected partition"""
-        if not self._require_disk(): return
-        if not self._require_part(): return
-        disk = self.selected_disk['path']
-        part_name = os.path.basename(self.selected_part)
-        # Get partition number
-        num = ''.join(
-            filter(str.isdigit, part_name))
-        if not num:
-            messagebox.showerror(
-                "Error", "Cannot determine partition number")
-            return
-        out, code = run_cmd(
-            f"parted -s {disk} set {num} boot on")
-        if code == 0:
-            messagebox.showinfo(
-                "Done",
-                f"Boot flag set on {self.selected_part}")
-        else:
-            messagebox.showerror("Failed", out)
+    def _set_boot(self):
+        if not self._req_part(): return
+        num = re.sub(r'^.*?(\d+)$', r'\1', os.path.basename(self._sel_part))
+        sh(f"parted -s {self._sel_disk} set {num} boot on")
+        messagebox.showinfo("Done", f"Boot flag set on {self._sel_part}")
         self._refresh_parts()
 
     def _set_active(self):
-        """Set partition as active (bootable) using sfdisk"""
-        if not self._require_disk(): return
-        if not self._require_part(): return
-        disk = self.selected_disk['path']
-        part_name = os.path.basename(self.selected_part)
-        num = ''.join(filter(str.isdigit, part_name))
-        if not num:
-            messagebox.showerror(
-                "Error", "Cannot determine partition number")
-            return
-        # Try multiple methods
-        out, code = run_cmd(
-            f"parted -s {disk} set {num} boot on && "
-            f"parted -s {disk} set {num} esp on 2>/dev/null "
-            f"|| true")
-        # Also use sfdisk to mark active
-        out2, code2 = run_cmd(
-            f"sfdisk --activate {disk} {num} 2>/dev/null "
-            f"|| true")
-        messagebox.showinfo(
-            "Done",
-            f"Partition {self.selected_part} set as active")
+        if not self._req_part(): return
+        num = re.sub(r'^.*?(\d+)$', r'\1', os.path.basename(self._sel_part))
+        sh(f"parted -s {self._sel_disk} set {num} esp on 2>/dev/null || true")
+        sh(f"parted -s {self._sel_disk} set {num} boot on")
+        sh(f"sfdisk --activate {self._sel_disk} {num} 2>/dev/null || true")
+        messagebox.showinfo("Done", f"Active set on {self._sel_part}")
         self._refresh_parts()
 
     def _resize_part(self):
-        """Resize selected partition"""
-        if not self._require_disk(): return
-        if not self._require_part(): return
-        disk = self.selected_disk['path']
-        part = self.selected_part
-        part_name = os.path.basename(part)
-        num = ''.join(filter(str.isdigit, part_name))
-
-        current_gb = part_size_gb(part)
-
-        new_size = simpledialog.askstring(
-            "Resize Partition",
-            f"Current size: {current_gb:.1f} GB\n"
-            f"New size in GB (e.g. 30):",
-            parent=self.root)
+        if not self._req_part(): return
+        cur, _, _ = sh(f"lsblk -b -o SIZE -n {self._sel_part} 2>/dev/null")
+        try: cur_gb = int(cur.split('\n')[-1]) / 1024**3
+        except: cur_gb = 0
+        new_size = simpledialog.askstring("Resize",
+            f"Current: {cur_gb:.1f} GB\nNew size in GB:", parent=self.root)
         if not new_size: return
-
-        try:
-            new_gb = float(new_size.strip())
-        except:
-            messagebox.showerror("Error", "Invalid size")
-            return
-
-        if new_gb < 1:
-            messagebox.showerror(
-                "Error", "Size must be at least 1 GB")
-            return
-
-        # Check if partition is mounted
-        parts = get_partitions(disk)
+        try: new_gb = float(new_size.strip())
+        except: messagebox.showerror("Error","Invalid"); return
+        parts = get_partitions(self._sel_disk)
         for p in parts:
-            if p['path'] == part and p['mount']:
-                messagebox.showerror(
-                    "Error",
-                    f"Partition {part} is mounted at "
-                    f"{p['mount']}\n"
-                    "Unmount it first!")
-                return
+            if p['path'] == self._sel_part and p['mount']:
+                messagebox.showerror("Error", f"Unmount {self._sel_part} first!"); return
+        fs, _, _ = sh(f"blkid -s TYPE -o value {self._sel_part} 2>/dev/null")
+        num = re.sub(r'^.*?(\d+)$', r'\1', os.path.basename(self._sel_part))
+        if not messagebox.askyesno("Confirm",
+                f"Resize {self._sel_part} to {new_gb:.1f} GB?\nBackup first!"): return
+        self._task_win("Resize", self._do_resize,
+                       self._sel_disk, self._sel_part, num, new_gb, fs.strip())
 
-        # Check filesystem
-        fstype_out, _ = run_cmd(
-            f"blkid -s TYPE -o value {part} 2>/dev/null")
-        fstype = fstype_out.strip()
-
-        confirm = messagebox.askyesno(
-            "Confirm Resize",
-            f"Resize {part} to {new_gb:.1f} GB?\n\n"
-            f"Current: {current_gb:.1f} GB\n"
-            f"New: {new_gb:.1f} GB\n\n"
-            "⚠ Backup your data first!")
-        if not confirm: return
-
-        # Run resize
-        self._run_task_window(
-            f"Resizing {part}",
-            self._do_resize,
-            disk, part, num, new_gb, fstype)
-
-    def _do_resize(self, log, done, disk, part, num,
-                   new_gb, fstype):
+    def _do_resize(self, log, done, disk, part, num, new_gb, fstype):
         try:
-            log(f"Resizing partition {num} to {new_gb:.1f} GB...")
-
-            # Check filesystem first
             if 'ext' in fstype:
-                log("Checking filesystem...")
-                out, code = run_cmd(
-                    f"e2fsck -f -y {part}", 120)
-                log(f"  e2fsck: "
-                    f"{'OK' if code <= 1 else out[-100:]}")
-
-            # Resize partition with parted
+                log("e2fsck..."); sh(f"e2fsck -f -y {part}", timeout=120)
             new_mib = int(new_gb * 1024)
-            log(f"Resizing partition to {new_mib} MiB...")
-            out, code = run_cmd(
-                f"parted -s {disk} resizepart {num} "
-                f"{new_mib}MiB", 30)
-            log(f"  parted: "
-                f"{'OK' if code==0 else out[-100:]}")
-
-            # Resize filesystem
+            log(f"Resizing to {new_mib} MiB...")
+            sh(f"parted -s {disk} resizepart {num} {new_mib}MiB", timeout=30)
+            sh("partprobe 2>/dev/null || true")
+            sh("udevadm settle 2>/dev/null || true")
             if 'ext' in fstype:
-                log("Resizing filesystem...")
-                out, code = run_cmd(
-                    f"resize2fs {part}", 120)
-                log(f"  resize2fs: "
-                    f"{'OK' if code==0 else out[-100:]}")
+                log("resize2fs..."); sh(f"resize2fs {part}", timeout=120)
             elif 'xfs' in fstype:
-                log("Resize XFS (mount first)...")
-                mnt = f"/mnt/resize_{num}"
-                run_cmd(f"mkdir -p {mnt}")
-                run_cmd(f"mount {part} {mnt}")
-                out, code = run_cmd(
-                    f"xfs_growfs {mnt}", 60)
-                run_cmd(f"umount {mnt}")
-                run_cmd(f"rmdir {mnt}")
-                log(f"  xfs_growfs: "
-                    f"{'OK' if code==0 else out[-100:]}")
-
-            log(f"\nResize complete!")
-            run_cmd(f"partprobe {disk}")
-
-        except Exception as e:
-            log(f"\nERROR: {e}")
-        finally:
-            done()
+                mnt = f"/mnt/xfs_{num}"
+                sh(f"mkdir -p {mnt}"); sh(f"mount {part} {mnt}")
+                sh(f"xfs_growfs {mnt}", timeout=60)
+                sh(f"umount {mnt}"); sh(f"rmdir {mnt}")
+            log("Resize complete!")
+        except Exception as e: log(f"ERROR: {e}")
+        finally: done()
 
     def _format_part(self):
-        if not self._require_part(): return
-        part = self.selected_part
-        fs = simpledialog.askstring(
-            "Format Partition",
-            f"Format {part} as:\n"
-            "ext4 / ext3 / xfs / fat32 / swap\n\n"
-            "Enter filesystem type:",
-            parent=self.root)
+        if not self._req_part(): return
+        fs = simpledialog.askstring("Format",
+            f"Format {self._sel_part} as:\next4/fat32/xfs/swap", parent=self.root)
         if not fs: return
         fs = fs.strip().lower()
-
-        if not messagebox.askyesno(
-                "⚠ WARNING",
-                f"Format {part} as {fs}?\n"
-                "ALL DATA will be erased!"):
-            return
-
+        if not messagebox.askyesno("⚠ WARNING",
+                f"Format {self._sel_part} as {fs}?\nALL DATA ERASED!"): return
         cmds = {
-            'ext4':  f"mkfs.ext4 -F {part}",
-            'ext3':  f"mkfs.ext3 -F {part}",
-            'xfs':   f"mkfs.xfs -f {part}",
-            'fat32': f"mkfs.fat -F32 {part}",
-            'vfat':  f"mkfs.fat -F32 {part}",
-            'swap':  f"mkswap {part}",
+            'ext4': f"mkfs.ext4 -F -E lazy_itable_init=0,lazy_journal_init=0 {self._sel_part}",
+            'fat32': f"mkfs.fat -F32 {self._sel_part}",
+            'vfat': f"mkfs.fat -F32 {self._sel_part}",
+            'xfs': f"mkfs.xfs -f {self._sel_part}",
+            'swap': f"mkswap {self._sel_part}",
         }
         cmd = cmds.get(fs)
-        if not cmd:
-            messagebox.showerror(
-                "Error", f"Unknown filesystem: {fs}")
-            return
-
-        out, code = run_cmd(cmd, 60)
-        if code == 0:
-            messagebox.showinfo(
-                "Done", f"{part} formatted as {fs}")
-        else:
-            messagebox.showerror("Failed", out)
+        if not cmd: messagebox.showerror("Error",f"Unknown: {fs}"); return
+        _, err, rc = sh(cmd, timeout=120)
+        messagebox.showinfo("Done", f"Formatted as {fs}" if rc==0 else f"Failed:\n{err}")
         self._refresh_parts()
 
     def _delete_part(self):
-        if not self._require_disk(): return
-        if not self._require_part(): return
-        disk = self.selected_disk['path']
-        part = self.selected_part
-        num = ''.join(filter(
-            str.isdigit, os.path.basename(part)))
-
-        if not messagebox.askyesno(
-                "Confirm Delete",
-                f"Delete partition {part}?\n"
-                "ALL DATA will be lost!"):
-            return
-
-        out, code = run_cmd(
-            f"parted -s {disk} rm {num}", 30)
-        if code == 0:
-            messagebox.showinfo(
-                "Done", f"Partition {part} deleted")
-        else:
-            messagebox.showerror("Failed", out)
-        self.selected_part = None
-        run_cmd(f"partprobe {disk}")
+        if not self._req_part(): return
+        num = re.sub(r'^.*?(\d+)$', r'\1', os.path.basename(self._sel_part))
+        if not messagebox.askyesno("Confirm Delete",
+                f"Delete {self._sel_part}?\nALL DATA LOST!"): return
+        _, err, rc = sh(f"parted -s {self._sel_disk} rm {num}", timeout=30)
+        messagebox.showinfo("Done", f"Deleted" if rc==0 else f"Failed:\n{err}")
+        self._sel_part = None
+        sh(f"partprobe {self._sel_disk}")
+        sh("udevadm settle 2>/dev/null || true")
         self._refresh_parts()
 
     def _toggle_mount(self):
-        if not self._require_part(): return
-        part = self.selected_part
-        parts = get_partitions(
-            self.selected_disk['path'])
+        if not self._req_part(): return
+        parts = get_partitions(self._sel_disk)
         mounted = None
         for p in parts:
-            if p['path'] == part and p['mount']:
-                mounted = p['mount']
-                break
-
+            if p['path'] == self._sel_part and p['mount']:
+                mounted = p['mount']; break
         if mounted:
-            out, code = run_cmd(
-                f"umount {part} 2>/dev/null || true")
-            messagebox.showinfo(
-                "Done", f"{part} unmounted")
+            sh(f"umount {self._sel_part} 2>/dev/null || true")
+            messagebox.showinfo("Done", f"Unmounted")
         else:
-            mnt = f"/mnt/{os.path.basename(part)}"
-            run_cmd(f"mkdir -p {mnt}")
-            out, code = run_cmd(
-                f"mount {part} {mnt} 2>/dev/null")
-            if code == 0:
-                messagebox.showinfo(
-                    "Done", f"{part} mounted at {mnt}")
-            else:
-                messagebox.showerror("Failed", out)
+            mnt = f"/mnt/{os.path.basename(self._sel_part)}"
+            sh(f"mkdir -p {mnt}")
+            _, err, rc = sh(f"mount {self._sel_part} {mnt}")
+            messagebox.showinfo("Done", f"Mounted at {mnt}" if rc==0 else f"Failed:\n{err}")
         self._refresh_parts()
 
-    def _run_task_window(self, title, func, *args):
-        """Generic progress window for long tasks"""
+    def _task_win(self, title, func, *args):
         win = tk.Toplevel(self.root)
-        win.title(title)
-        win.geometry("560x340")
-        win.configure(bg=BG)
-        win.grab_set()
-
-        tk.Label(win, text=title,
-                 font=('Arial', 12, 'bold'),
+        win.title(title); win.geometry("560x340")
+        win.configure(bg=BG); win.grab_set()
+        tk.Label(win, text=title, font=('Arial',12,'bold'),
                  bg=BG, fg=PURPLE).pack(pady=8)
-
-        log_text = tk.Text(win, bg='#111827',
-                           fg='#A5F3FC',
-                           font=('Courier', 10),
-                           relief='flat', state='disabled')
-        log_text.pack(fill='both', expand=True,
-                      padx=12, pady=4)
-
-        close_btn = self._btn(win, "Close", win.destroy,
-                              BG3)
-        close_btn.pack(pady=8)
-        close_btn.config(state='disabled')
-
+        lt = tk.Text(win, bg='#111827', fg='#A5F3FC',
+                     font=('Courier',10), relief='flat', state='disabled')
+        lt.pack(fill='both', expand=True, padx=12, pady=4)
+        cb = self._btn(win, "Close", win.destroy, BG3)
+        cb.pack(pady=8); cb.config(state='disabled')
         def log(msg):
             def _do():
-                log_text.config(state='normal')
-                log_text.insert('end', msg + '\n')
-                log_text.see('end')
-                log_text.config(state='disabled')
+                lt.config(state='normal'); lt.insert('end',msg+'\n')
+                lt.see('end'); lt.config(state='disabled')
             win.after(0, _do)
-
         def done():
-            win.after(0, close_btn.config,
-                      {'state': 'normal'})
-            log("Done!")
-            self._refresh_parts()
+            win.after(0, cb.config, {'state':'normal'})
+            log("Done!"); self._refresh_parts()
+        threading.Thread(target=func, args=(log,done)+args, daemon=True).start()
 
-        threading.Thread(
-            target=func,
-            args=(log, done) + args,
-            daemon=True).start()
-
-    # ═══════════════════════════════════════════════════════════
-    # PAGE: Install OS
-    # ═══════════════════════════════════════════════════════════
+    # ─── INSTALL OS ────────────────────────────────────────────
     def _page_install(self):
-        self._install_step = 0
-        self._steps_done = set()
-
+        self._step = 0
         top = tk.Frame(self.content, bg=BG2, pady=8)
         top.pack(fill='x')
-        self._step_label = tk.Label(
-            top,
-            text="Step 1 of 4: Select Disk",
-            font=('Arial', 13, 'bold'),
-            bg=BG2, fg=PURPLE)
-        self._step_label.pack(side='left', padx=14)
-
-        # Step indicator strip
+        self._step_lbl = tk.Label(top, text="Step 1 of 4",
+            font=('Arial',13,'bold'), bg=BG2, fg=PURPLE)
+        self._step_lbl.pack(side='left', padx=14)
         strip = tk.Frame(self.content, bg=BG, pady=4)
         strip.pack(fill='x', padx=10)
-        self._step_inds = []
-        for i, n in enumerate(
-                ['1. Disk', '2. User',
-                 '3. Settings', '4. Confirm']):
-            lbl = tk.Label(strip, text=n,
-                           font=('Arial', 9),
-                           bg=BG, fg=GRAY)
-            lbl.pack(side='left', expand=True)
-            self._step_inds.append(lbl)
-
-        tk.Frame(self.content, bg=BG2,
-                 height=1).pack(fill='x')
-
-        # IMPORTANT: pack nav BEFORE wiz
-        # so side='bottom' works correctly
+        self._inds = []
+        for n in ['1.Disk','2.User','3.Settings','4.Confirm']:
+            l = tk.Label(strip, text=n, font=('Arial',9), bg=BG, fg=GRAY)
+            l.pack(side='left', expand=True); self._inds.append(l)
+        tk.Frame(self.content, bg=BG2, height=1).pack(fill='x')
+        # nav BEFORE wiz
         nav = tk.Frame(self.content, bg=BG2, pady=8)
         nav.pack(fill='x', side='bottom')
-        self._back_btn = self._btn(
-            nav, "◀ Back",
-            self._install_back, BG3)
-        self._back_btn.pack(side='left', padx=12)
-        self._next_btn = self._btn(
-            nav, "Next ▶",
-            self._install_next, PURPLE)
-        self._next_btn.pack(side='right', padx=12)
-
-        # Pack wiz AFTER nav so it fills remaining space
+        self._back = self._btn(nav,"◀ Back",self._step_back,BG3)
+        self._back.pack(side='left', padx=12)
+        self._next = self._btn(nav,"Next ▶",self._step_next,PURPLE)
+        self._next.pack(side='right', padx=12)
         self._wiz = tk.Frame(self.content, bg=BG)
-        self._wiz.pack(fill='both', expand=True,
-                       padx=16, pady=8)
-
+        self._wiz.pack(fill='both', expand=True, padx=16, pady=8)
         self._show_step(0)
 
     def _show_step(self, step):
-        self._install_step = step
-        for w in self._wiz.winfo_children():
-            w.destroy()
-        names = ['Disk', 'User', 'Settings', 'Confirm']
-        for i, ind in enumerate(self._step_inds):
-            if i < step:
-                ind.config(fg=GREEN,
-                           font=('Arial', 9, 'bold'))
-            elif i == step:
-                ind.config(fg=PURPLE,
-                           font=('Arial', 9, 'bold'))
-            else:
-                ind.config(fg=GRAY, font=('Arial', 9))
-        self._step_label.config(
-            text=f"Step {step+1} of 4: {names[step]}")
-        [self._step_disk, self._step_user,
-         self._step_settings, self._step_confirm][step]()
-        self._back_btn.config(
-            state='normal' if step > 0 else 'disabled')
-        if step == 3:
-            self._next_btn.config(
-                text="INSTALL NOW ▶", bg=RED)
-        else:
-            self._next_btn.config(
-                text="Next ▶", bg=PURPLE)
+        self._step = step
+        for w in self._wiz.winfo_children(): w.destroy()
+        names = ['Disk','User','Settings','Confirm']
+        for i, ind in enumerate(self._inds):
+            ind.config(fg=GREEN if i<step else PURPLE if i==step else GRAY,
+                       font=('Arial',9,'bold') if i<=step else ('Arial',9))
+        self._step_lbl.config(text=f"Step {step+1} of 4: {names[step]}")
+        [self._s_disk,self._s_user,self._s_settings,self._s_confirm][step]()
+        self._back.config(state='normal' if step>0 else 'disabled')
+        if step == 3: self._next.config(text="INSTALL NOW", bg=RED)
+        else: self._next.config(text="Next ▶", bg=PURPLE)
 
-    def _install_back(self):
-        if self._install_step > 0:
-            self._show_step(self._install_step - 1)
+    def _step_back(self):
+        if self._step > 0: self._show_step(self._step - 1)
 
-    def _install_next(self):
-        if self._install_step < 3:
-            self._show_step(self._install_step + 1)
+    def _step_next(self):
+        if self._step < 3: self._show_step(self._step + 1)
         else:
             if not self.install_data.get('disk'):
-                messagebox.showerror(
-                    "Error",
-                    "Please go back and select a disk!")
-                return
-            if messagebox.askyesno(
-                    "⚠ FINAL CONFIRMATION",
-                    f"Install RIDOS OS on "
-                    f"{self.install_data['disk']}?\n\n"
-                    "ALL DATA WILL BE ERASED!\n"
-                    "This cannot be undone!"):
+                messagebox.showerror("Error","Select a disk first!"); return
+            if messagebox.askyesno("⚠ FINAL CONFIRMATION",
+                    f"Install RIDOS OS on {self.install_data['disk']}?\n\n"
+                    "ALL DATA WILL BE ERASED!\nThis cannot be undone!"):
                 self._start_install()
 
-    def _step_disk(self):
+    def _s_disk(self):
         f = self._wiz
         tk.Label(f, text="Select installation disk:",
-                 font=('Arial', 11, 'bold'),
-                 bg=BG, fg=TEXT).pack(anchor='w',
-                                      pady=(0, 6))
-        tk.Label(
-            f,
-            text="⚠  All data on the disk will be erased!",
-            font=('Arial', 10), bg=BG,
-            fg=YELLOW).pack(anchor='w', pady=(0, 10))
-
+                 font=('Arial',11,'bold'), bg=BG, fg=TEXT).pack(anchor='w', pady=(0,6))
+        tk.Label(f, text=f"Boot mode: {'UEFI' if self._efi else 'BIOS/MBR'}",
+                 font=('Arial',10), bg=BG, fg=CYAN).pack(anchor='w', pady=(0,4))
+        tk.Label(f, text="⚠  All data on selected disk will be erased!",
+                 font=('Arial',10), bg=BG, fg=YELLOW).pack(anchor='w', pady=(0,10))
         disks = get_disks()
         if not disks:
-            tk.Label(f, text="No disks found!",
-                     bg=BG, fg=RED).pack()
-            return
-
-        self._disk_var = tk.StringVar(
-            value=self.install_data.get('disk', ''))
-        for d in disks:
-            rb = tk.Radiobutton(
-                f,
-                text=f"/dev/{d['name']}  —  "
-                     f"{d['size']}  —  {d['model']}",
-                variable=self._disk_var,
-                value=d['path'],
-                font=('Arial', 11),
-                bg=BG, fg=TEXT,
-                selectcolor=BG3,
-                activebackground=BG,
-                command=lambda p=d['path']:
-                self.install_data.__setitem__('disk', p))
-            rb.pack(anchor='w', pady=3)
-
+            tk.Label(f, text="No disks found!", bg=BG, fg=RED).pack(); return
+        self._dv = tk.StringVar(value=self.install_data.get('disk',''))
+        for path, label, gb in disks:
+            tk.Radiobutton(f, text=f"{path}  —  {label}",
+                variable=self._dv, value=path,
+                font=('Arial',11), bg=BG, fg=TEXT,
+                selectcolor=BG3, activebackground=BG,
+                command=lambda p=path:
+                    self.install_data.__setitem__('disk', p)
+            ).pack(anchor='w', pady=3)
         if disks and not self.install_data.get('disk'):
-            self._disk_var.set(disks[0]['path'])
-            self.install_data['disk'] = disks[0]['path']
+            self._dv.set(disks[0][0])
+            self.install_data['disk'] = disks[0][0]
+        layout = ("\nLayout (UEFI):\n"
+                  "  1. 512MB EFI [esp+boot]\n"
+                  "  2. 2GB Swap\n"
+                  "  3. Rest Root EXT4 [boot]"
+                  ) if self._efi else (
+                  "\nLayout (BIOS/MBR):\n"
+                  "  1. 2GB Swap\n"
+                  "  2. Rest Root EXT4 [boot]")
+        tk.Label(f, text=layout, font=('Courier',9),
+                 bg=BG, fg=GRAY, justify='left').pack(anchor='w', pady=10)
 
-        tk.Label(
-            f,
-            text="\nPartitions to be created:\n"
-                 "  1.  512 MB  EFI  (FAT32)  [esp+boot]\n"
-                 "  2.    4 GB  Swap\n"
-                 "  3. Remaining  Root  (EXT4) [boot]",
-            font=('Courier', 9),
-            bg=BG, fg=GRAY,
-            justify='left').pack(anchor='w', pady=10)
-
-    def _step_user(self):
+    def _s_user(self):
         f = self._wiz
-        tk.Label(f, text="User Account",
-                 font=('Arial', 12, 'bold'),
-                 bg=BG, fg=PURPLE).pack(
-                     anchor='w', pady=(0, 10))
+        tk.Label(f, text="User Account", font=('Arial',12,'bold'),
+                 bg=BG, fg=PURPLE).pack(anchor='w', pady=(0,10))
         for label, key, default, secret in [
-            ('Full Name',  'fullname',  'RIDOS User', False),
-            ('Username',   'username',  'ridos',      False),
-            ('Password',   'password',  'ridos',      True),
-            ('Hostname',   'hostname',  'ridos-os',   False),
+            ('Full Name','fullname','RIDOS User',False),
+            ('Username','username','ridos',False),
+            ('Password','password','ridos',True),
+            ('Hostname','hostname','ridos-os',False),
         ]:
-            row = tk.Frame(f, bg=BG)
-            row.pack(fill='x', pady=4)
-            tk.Label(row, text=f"{label}:",
-                     font=('Arial', 10),
-                     bg=BG, fg=TEXT,
-                     width=12, anchor='e').pack(side='left')
-            e = tk.Entry(row, font=('Arial', 11),
-                         bg=BG2, fg=TEXT,
-                         insertbackground=TEXT,
-                         relief='flat', bd=4, width=26)
+            row = tk.Frame(f, bg=BG); row.pack(fill='x', pady=4)
+            tk.Label(row, text=f"{label}:", font=('Arial',10),
+                     bg=BG, fg=TEXT, width=12, anchor='e').pack(side='left')
+            e = tk.Entry(row, font=('Arial',11), bg=BG2, fg=TEXT,
+                         insertbackground=TEXT, relief='flat', bd=4, width=26)
             e.insert(0, self.install_data.get(key, default))
             if secret: e.config(show='*')
             e.pack(side='left', padx=8)
             e.bind('<KeyRelease>',
                    lambda ev, k=key:
-                   self.install_data.__setitem__(
-                       k, ev.widget.get()))
+                   self.install_data.__setitem__(k, ev.widget.get()))
 
-    def _step_settings(self):
+    def _s_settings(self):
         f = self._wiz
-        tk.Label(f, text="System Settings",
-                 font=('Arial', 12, 'bold'),
-                 bg=BG, fg=PURPLE).pack(
-                     anchor='w', pady=(0, 10))
-        row = tk.Frame(f, bg=BG)
-        row.pack(fill='x', pady=4)
-        tk.Label(row, text="Timezone:",
-                 font=('Arial', 10), bg=BG, fg=TEXT,
-                 width=12, anchor='e').pack(side='left')
-        out, _ = run_cmd(
-            "timedatectl list-timezones 2>/dev/null "
-            "| head -100")
-        zones = (out.strip().split('\n')
-                 if out.strip()
-                 else ["Asia/Baghdad", "UTC"])
-        self._tz_var = tk.StringVar(
-            value=self.install_data.get(
-                'timezone', 'Asia/Baghdad'))
-        combo = ttk.Combobox(
-            row, textvariable=self._tz_var,
-            values=zones, font=('Arial', 10),
-            width=30, state='readonly')
+        tk.Label(f, text="System Settings", font=('Arial',12,'bold'),
+                 bg=BG, fg=PURPLE).pack(anchor='w', pady=(0,10))
+        row = tk.Frame(f, bg=BG); row.pack(fill='x', pady=4)
+        tk.Label(row, text="Timezone:", font=('Arial',10),
+                 bg=BG, fg=TEXT, width=12, anchor='e').pack(side='left')
+        out, _, _ = sh("timedatectl list-timezones 2>/dev/null | head -100")
+        zones = out.split('\n') if out else ["Asia/Baghdad","UTC"]
+        self._tz = tk.StringVar(
+            value=self.install_data.get('timezone','Asia/Baghdad'))
+        combo = ttk.Combobox(row, textvariable=self._tz,
+                             values=zones, font=('Arial',10),
+                             width=30, state='readonly')
         combo.pack(side='left', padx=8)
         combo.bind('<<ComboboxSelected>>',
-                   lambda e:
-                   self.install_data.__setitem__(
-                       'timezone', self._tz_var.get()))
+                   lambda e: self.install_data.__setitem__(
+                       'timezone', self._tz.get()))
 
-    def _step_confirm(self):
+    def _s_confirm(self):
         f = self._wiz
         d = self.install_data
-        tk.Label(f, text="Review your choices:",
-                 font=('Arial', 11, 'bold'),
-                 bg=BG, fg=TEXT).pack(
-                     anchor='w', pady=(0, 8))
-        tk.Label(
-            f,
-            text=f"  Disk:      {d.get('disk','NOT SET')}\n"
-                 f"  Username:  {d.get('username','')}\n"
-                 f"  Hostname:  {d.get('hostname','')}\n"
-                 f"  Timezone:  {d.get('timezone','')}",
-            font=('Courier', 11),
-            bg=BG2, fg=TEXT,
-            justify='left',
-            padx=12, pady=10).pack(fill='x', pady=6)
-        tk.Label(
-            f,
-            text="⚠  ALL DATA ON THE DISK WILL BE ERASED!",
-            font=('Arial', 12, 'bold'),
-            bg=BG, fg=RED).pack(pady=8)
+        tk.Label(f, text="Review before installing:",
+                 font=('Arial',11,'bold'), bg=BG, fg=TEXT).pack(anchor='w', pady=(0,8))
+        tk.Label(f,
+            text=f"  Disk:     {d.get('disk','NOT SET')}\n"
+                 f"  Mode:     {'UEFI' if self._efi else 'BIOS/MBR'}\n"
+                 f"  Username: {d.get('username','')}\n"
+                 f"  Hostname: {d.get('hostname','')}\n"
+                 f"  Timezone: {d.get('timezone','')}",
+            font=('Courier',11), bg=BG2, fg=TEXT,
+            justify='left', padx=12, pady=10).pack(fill='x', pady=6)
+        tk.Label(f, text="⚠  ALL DATA WILL BE ERASED!",
+                 font=('Arial',12,'bold'), bg=BG, fg=RED).pack(pady=8)
 
-    # ── Installation engine ────────────────────────────────────
+    # ─── INSTALLATION ENGINE — 12 proven steps ────────────────
     def _start_install(self):
-        for w in self.content.winfo_children():
-            w.destroy()
+        for w in self.content.winfo_children(): w.destroy()
         top = tk.Frame(self.content, bg=BG2, pady=8)
         top.pack(fill='x')
         tk.Label(top, text="Installing RIDOS OS...",
-                 font=('Arial', 13, 'bold'),
-                 bg=BG2, fg=PURPLE).pack(side='left',
-                                          padx=14)
-        self._prog_status = tk.Label(
-            self.content, text="Preparing...",
-            font=('Arial', 10), bg=BG, fg=YELLOW)
-        self._prog_status.pack(anchor='w',
-                               padx=14, pady=2)
-        self._prog_bar = ttk.Progressbar(
-            self.content, orient='horizontal',
-            length=950, mode='determinate')
-        self._prog_bar.pack(padx=14, pady=2)
-
-        log_frame = tk.Frame(self.content, bg=BG)
-        log_frame.pack(fill='both', expand=True,
-                       padx=14, pady=4)
-        self._log_text = tk.Text(
-            log_frame, bg='#111827', fg='#A5F3FC',
-            font=('Courier', 10), relief='flat',
-            state='disabled')
-        sb = tk.Scrollbar(log_frame,
-                          command=self._log_text.yview)
-        self._log_text.config(yscrollcommand=sb.set)
-        sb.pack(side='right', fill='y')
-        self._log_text.pack(fill='both', expand=True)
-
-        threading.Thread(
-            target=self._do_install,
-            daemon=True).start()
+                 font=('Arial',13,'bold'), bg=BG2, fg=PURPLE).pack(side='left', padx=14)
+        self._ps = tk.Label(self.content, text="Preparing...",
+                            font=('Arial',10), bg=BG, fg=YELLOW)
+        self._ps.pack(anchor='w', padx=14, pady=2)
+        self._pb = ttk.Progressbar(self.content, orient='horizontal',
+                                   length=950, mode='determinate')
+        self._pb.pack(padx=14, pady=2)
+        lf = tk.Frame(self.content, bg=BG)
+        lf.pack(fill='both', expand=True, padx=14, pady=4)
+        self._lt = tk.Text(lf, bg='#111827', fg='#A5F3FC',
+                           font=('Courier',10), relief='flat', state='disabled')
+        sb2 = tk.Scrollbar(lf, command=self._lt.yview)
+        self._lt.config(yscrollcommand=sb2.set)
+        sb2.pack(side='right', fill='y')
+        self._lt.pack(fill='both', expand=True)
+        threading.Thread(target=self._run_install, daemon=True).start()
 
     def _log(self, msg):
         def _do():
-            self._log_text.config(state='normal')
-            self._log_text.insert('end', msg + '\n')
-            self._log_text.see('end')
-            self._log_text.config(state='disabled')
+            self._lt.config(state='normal')
+            self._lt.insert('end', msg+'\n')
+            self._lt.see('end')
+            self._lt.config(state='disabled')
         self.root.after(0, _do)
 
     def _prog(self, pct, msg):
-        self.root.after(
-            0, self._prog_bar.config, {'value': pct})
-        self.root.after(
-            0, self._prog_status.config, {'text': msg})
+        self.root.after(0, self._pb.config, {'value': pct})
+        self.root.after(0, self._ps.config, {'text': msg})
 
-    def _do_install(self):
+    def _run_install(self):
         d    = self.install_data
         disk = d['disk']
-        user = d.get('username', 'ridos')
-        pwd  = d.get('password', 'ridos')
-        host = d.get('hostname', 'ridos-os')
-        tz   = d.get('timezone', 'Asia/Baghdad')
-        tgt  = '/mnt/ridos-install'
-
-        pfx  = disk + 'p' if 'nvme' in disk else disk
-        efi  = pfx + '1'
-        swap = pfx + '2'
-        root = pfx + '3'
+        user = d.get('username','ridos')
+        pw   = d.get('password','ridos')
+        host = d.get('hostname','ridos-os')
+        tz   = d.get('timezone','Asia/Baghdad')
+        mnt  = MNT
+        efi  = self._efi
 
         try:
-            # ── 1. Partition ──────────────────────────────
-            self._prog(5, "Partitioning disk...")
-            self._log(f"[1/7] Partitioning {disk}...")
+            # ── Step 1: Clean old mounts ──────────────────────
+            self._prog(1, "[1/12] Cleaning...")
+            self._log("[1/12] Cleaning old mounts...")
+            for sub in ['dev/pts','dev','proc','sys','run',
+                        'boot/efi','']:
+                sh(f"umount -l {mnt}/{sub} 2>/dev/null || true")
+            sh(f"rm -rf {mnt}")
+            sh(f"mkdir -p {mnt}")
+            self._log("  OK")
 
-            for cmd in [
-                f"parted -s {disk} mklabel gpt",
-                # EFI partition with esp+boot flags
-                f"parted -s {disk} mkpart ESP fat32 "
-                f"1MiB 512MiB",
-                f"parted -s {disk} set 1 esp on",
-                f"parted -s {disk} set 1 boot on",
-                # Swap
-                f"parted -s {disk} mkpart primary "
-                f"linux-swap 512MiB 4608MiB",
-                # Root with boot flag
-                f"parted -s {disk} mkpart primary "
-                f"ext4 4608MiB 100%",
-                f"parted -s {disk} set 3 boot on",
-                "sleep 2",
-                f"partprobe {disk}",
-                "sleep 1",
-            ]:
-                out, code = run_cmd(cmd, 30)
-                self._log(
-                    f"  {'OK' if code==0 else 'WARN'}"
-                    f": {cmd.split()[0]} "
-                    f"{' '.join(cmd.split()[1:3])}")
+            # ── Step 2: Partition ─────────────────────────────
+            self._prog(4, "[2/12] Partitioning...")
+            self._log(f"[2/12] Partitioning {disk}...")
+            if efi:
+                self._log("  UEFI/GPT mode")
+                sh(f"parted -s {disk} mklabel gpt")
+                sh(f"parted -s {disk} mkpart ESP fat32 1MiB 513MiB")
+                sh(f"parted -s {disk} set 1 esp on")
+                sh(f"parted -s {disk} set 1 boot on")
+                sh(f"parted -s {disk} mkpart primary linux-swap 513MiB 2561MiB")
+                sh(f"parted -s {disk} mkpart primary ext4 2561MiB 100%")
+                sh(f"parted -s {disk} set 3 boot on")
+                pfx = disk+'p' if 'nvme' in disk else disk
+                efi_p=pfx+'1'; swap_p=pfx+'2'; root_p=pfx+'3'
+            else:
+                self._log("  BIOS/MBR mode")
+                sh(f"parted -s {disk} mklabel msdos")
+                sh(f"parted -s {disk} mkpart primary linux-swap 1MiB 2049MiB")
+                sh(f"parted -s {disk} mkpart primary ext4 2049MiB 100%")
+                sh(f"parted -s {disk} set 2 boot on")
+                pfx = disk+'p' if 'nvme' in disk else disk
+                efi_p=None; swap_p=pfx+'1'; root_p=pfx+'2'
+            self._log(f"  swap={swap_p} root={root_p}")
 
-            # Verify partitions exist
-            self._log("  Verifying partitions...")
-            for part in [efi, swap, root]:
-                if not os.path.exists(part):
-                    # Try alternate naming
-                    alt = part.replace(disk, disk+'p') \
-                        if 'nvme' not in disk \
-                        else part
-                    if os.path.exists(alt):
-                        if part == efi:  efi  = alt
-                        if part == swap: swap = alt
-                        if part == root: root = alt
-                    else:
-                        # Wait for udev
-                        run_cmd(
-                            f"udevadm settle 2>/dev/null "
-                            f"|| sleep 2")
+            # ── Step 3: Wait for kernel ───────────────────────
+            self._prog(7, "[3/12] Waiting for kernel...")
+            self._log("[3/12] partprobe + udevadm settle + sleep 3...")
+            sh("partprobe 2>/dev/null || true")
+            sh("udevadm settle 2>/dev/null || true")
+            sh("sleep 3")
+            self._log("  OK")
 
-            self._log(
-                f"  EFI={efi} SWAP={swap} ROOT={root}")
+            # ── Step 4: Format ────────────────────────────────
+            self._prog(10, "[4/12] Formatting...")
+            self._log("[4/12] Formatting partitions...")
+            if efi_p:
+                _, err, rc = sh(f"mkfs.fat -F 32 {efi_p}", timeout=60)
+                self._log(f"  EFI: {'OK' if rc==0 else err[:80]}")
+            _, err, rc = sh(f"mkswap {swap_p}", timeout=30)
+            self._log(f"  Swap: {'OK' if rc==0 else err[:80]}")
+            sh(f"swapon {swap_p} 2>/dev/null || true")
+            _, err, rc = sh(
+                f"mkfs.ext4 -F "
+                f"-E lazy_itable_init=0,lazy_journal_init=0 "
+                f"{root_p}", timeout=120)
+            self._log(f"  Root: {'OK' if rc==0 else err[:80]}")
+            if rc != 0:
+                raise Exception(f"mkfs.ext4 failed: {err}")
 
-            # ── 2. Format ─────────────────────────────────
-            self._prog(12, "Formatting partitions...")
-            self._log("[2/7] Formatting...")
-            for cmd, desc in [
-                (f"mkfs.fat -F32 -n EFI {efi}", "EFI"),
-                (f"mkswap {swap}",              "Swap"),
-                (f"mkfs.ext4 -F -L RIDOS {root}","Root"),
-            ]:
-                out, code = run_cmd(cmd, 60)
-                self._log(
-                    f"  {desc}: "
-                    f"{'OK' if code==0 else out[:100]}")
-                if code != 0 and desc == "Root":
-                    raise Exception(
-                        f"Format root failed: {out}")
+            # ── Step 5: Mount ─────────────────────────────────
+            self._prog(13, "[5/12] Mounting...")
+            self._log("[5/12] Mounting partitions...")
+            _, err, rc = sh(f"mount {root_p} {mnt}")
+            if rc != 0:
+                raise Exception(f"Cannot mount root: {err}")
+            if efi_p:
+                sh(f"mkdir -p {mnt}/boot/efi")
+                sh(f"mount {efi_p} {mnt}/boot/efi")
+            self._log("  OK")
 
-            # ── 3. Mount ──────────────────────────────────
-            self._prog(18, "Mounting target...")
-            self._log("[3/7] Mounting...")
-            run_cmd(f"mkdir -p {tgt}")
-            out, code = run_cmd(f"mount {root} {tgt}")
-            if code != 0:
-                raise Exception(
-                    f"Cannot mount root: {out}")
-            run_cmd(f"mkdir -p {tgt}/boot/efi")
-            run_cmd(f"mount {efi} {tgt}/boot/efi")
-            run_cmd(f"swapon {swap} 2>/dev/null || true")
-            self._log("  Mounts: OK")
-
-            # ── 4. Squashfs ───────────────────────────────
-            self._prog(20, "Finding system image...")
-            self._log("[4/7] Finding system image...")
+            # ── Step 6: Copy filesystem ───────────────────────
+            self._prog(15, "[6/12] Finding squashfs...")
+            self._log("[6/12] Finding system image...")
             sq = find_squashfs()
             if not sq:
                 raise Exception(
                     "Cannot find filesystem.squashfs!\n"
-                    "Are you booted from the live USB?")
+                    "Boot from live USB first.")
             self._log(f"  Found: {sq}")
-            run_cmd(
-                f"chmod 644 {sq} 2>/dev/null || true")
-            run_cmd("mkdir -p /mnt/ridos-sq")
-            out, code = run_cmd(
-                f"mount -t squashfs -o loop,ro "
-                f"{sq} /mnt/ridos-sq")
-            if code != 0:
-                raise Exception(
-                    f"Cannot mount squashfs: {out}")
+            sh(f"chmod 644 {sq} 2>/dev/null || true")
 
-            # ── 5. Copy ───────────────────────────────────
-            self._prog(25, "Copying files (10-20 min)...")
-            self._log("[5/7] Copying RIDOS OS...")
-            self._log("  Please wait 10-20 minutes...")
-            out, code = run_cmd(
+            # unsquashfs to temp then rsync
+            tmp_sq = "/tmp/sq_extract"
+            sh(f"rm -rf {tmp_sq}")
+            sh(f"mkdir -p {tmp_sq}")
+            self._prog(18, "[6/12] Extracting squashfs...")
+            self._log("  Extracting squashfs...")
+            rc2 = sh_log(
+                f"unsquashfs -f -d {tmp_sq} {sq}",
+                self._log, timeout=1800)
+
+            # unsquashfs creates squashfs-root/ inside tmp_sq
+            src = f"{tmp_sq}/squashfs-root"
+            if not os.path.exists(src):
+                self._log("  Mounting squashfs (fallback)...")
+                sh(f"rm -rf {tmp_sq}"); sh(f"mkdir -p {tmp_sq}")
+                _, err, rc3 = sh(
+                    f"mount -t squashfs -o loop,ro {sq} {tmp_sq}")
+                if rc3 != 0:
+                    raise Exception(f"Cannot mount squashfs: {err}")
+                src = tmp_sq
+
+            self._prog(25, "[6/12] Copying files (10-20 min)...")
+            self._log("  Copying files to disk...")
+            rc4 = sh_log(
                 f"rsync -aAXH "
-                f"--exclude=/proc "
-                f"--exclude=/sys "
-                f"--exclude=/dev "
-                f"--exclude=/run "
-                f"--exclude=/tmp "
-                f"--exclude=/mnt "
-                f"--exclude=/media "
-                f"--exclude=/lost+found "
-                f"/mnt/ridos-sq/ {tgt}/",
-                timeout=1800)
-            run_cmd(
-                "umount /mnt/ridos-sq 2>/dev/null; "
-                "rmdir /mnt/ridos-sq 2>/dev/null || true")
-            if code != 0:
-                raise Exception(
-                    f"rsync failed ({code}):\n"
-                    f"{out[-200:]}")
+                f"--exclude=/proc --exclude=/sys "
+                f"--exclude=/dev --exclude=/run "
+                f"--exclude=/tmp --exclude=/mnt "
+                f"--exclude=/media --exclude=/lost+found "
+                f"{src}/ {mnt}/",
+                self._log, timeout=1800)
+            sh(f"umount {tmp_sq} 2>/dev/null || true")
+            sh(f"rm -rf {tmp_sq} 2>/dev/null || true")
+            if rc4 != 0:
+                raise Exception(f"rsync failed (exit {rc4})")
             self._log("  Files copied: OK")
 
-            # ── 6. Configure ──────────────────────────────
-            self._prog(75, "Configuring system...")
-            self._log("[6/7] Configuring...")
+            # ── Step 7: Bind mounts AFTER rsync ───────────────
+            self._prog(65, "[7/12] Bind mounts...")
+            self._log("[7/12] Binding system dirs (after rsync)...")
+            for d_bind in ['/dev','/dev/pts','/proc','/sys','/run']:
+                sh(f"mkdir -p {mnt}{d_bind}")
+                sh(f"mount --rbind {d_bind} {mnt}{d_bind}")
+            self._log("  OK")
 
-            for dd in ['proc','sys','dev',
-                       'dev/pts','run','tmp']:
-                run_cmd(f"mkdir -p {tgt}/{dd}")
-
-            # fstab with correct UUIDs
-            ru, _ = run_cmd(
-                f"blkid -s UUID -o value {root}")
-            eu, _ = run_cmd(
-                f"blkid -s UUID -o value {efi}")
-            su, _ = run_cmd(
-                f"blkid -s UUID -o value {swap}")
-            with open(f"{tgt}/etc/fstab", 'w') as fh:
-                fh.write(
-                    f"UUID={ru.strip()}  /  ext4  "
-                    f"defaults,noatime  0 1\n"
-                    f"UUID={eu.strip()}  /boot/efi  "
-                    f"vfat  umask=0077  0 2\n"
-                    f"UUID={su.strip()}  none  swap  "
-                    f"sw  0 0\n")
-            self._log("  fstab: OK")
-
-            with open(f"{tgt}/etc/hostname", 'w') as fh:
-                fh.write(host + '\n')
-
-            run_cmd(
-                f"chroot {tgt} ln -sf "
-                f"/usr/share/zoneinfo/{tz} "
-                f"/etc/localtime 2>/dev/null || true")
-
-            run_cmd(
-                f"chroot {tgt} userdel -r {user} "
-                f"2>/dev/null || true")
-            run_cmd(
-                f"chroot {tgt} useradd -m "
-                f"-s /bin/bash "
-                f"-G sudo,audio,video,netdev,plugdev "
-                f"{user}")
-            run_cmd(
-                f"echo '{user}:{pwd}' | "
-                f"chroot {tgt} chpasswd")
-            run_cmd(
-                f"echo 'root:{pwd}' | "
-                f"chroot {tgt} chpasswd")
+            # ── Step 8: Configure ─────────────────────────────
+            self._prog(68, "[8/12] Configuring system...")
+            self._log("[8/12] Configuring...")
+            with open(f"{mnt}/etc/hostname",'w') as f:
+                f.write(host+'\n')
+            sh(f"chroot {mnt} ln -sf "
+               f"/usr/share/zoneinfo/{tz} /etc/localtime 2>/dev/null || true")
+            root_uuid,_,_ = sh(f"blkid -s UUID -o value {root_p}")
+            root_uuid = root_uuid.strip()
+            swap_uuid,_,_ = sh(f"blkid -s UUID -o value {swap_p}")
+            swap_uuid = swap_uuid.strip()
+            fstab = (f"UUID={root_uuid}  /  ext4  "
+                     f"defaults,errors=remount-ro  0  1\n"
+                     f"UUID={swap_uuid}  none  swap  sw  0  0\n")
+            if efi_p:
+                efi_uuid,_,_ = sh(f"blkid -s UUID -o value {efi_p}")
+                fstab += (f"UUID={efi_uuid.strip()}  /boot/efi  "
+                          f"vfat  umask=0077  0  2\n")
+            with open(f"{mnt}/etc/fstab",'w') as f:
+                f.write(fstab)
+            self._log(f"  fstab: root UUID={root_uuid[:8]}...")
+            sh(f"chroot {mnt} userdel -r {user} 2>/dev/null || true")
+            sh(f"chroot {mnt} useradd -m -s /bin/bash "
+               f"-G sudo,audio,video,netdev,plugdev {user}")
+            p = subprocess.Popen(
+                f"chroot {mnt} chpasswd",
+                shell=True, stdin=subprocess.PIPE)
+            p.communicate(
+                input=f"{user}:{pw}\nroot:{pw}\n".encode())
             self._log(f"  User '{user}': OK")
+            # disable live autologin
+            for fp in [f"{mnt}/etc/lightdm/lightdm.conf.d/50-ridos.conf",
+                       f"{mnt}/etc/lightdm/lightdm.conf"]:
+                if os.path.exists(fp):
+                    c = open(fp).read()
+                    c = c.replace('autologin-user=ridos',
+                                  '#autologin-user=ridos')
+                    open(fp,'w').write(c)
+            sh(f"chroot {mnt} apt-get remove -y "
+               f"live-boot live-boot-initramfs-tools "
+               f"2>/dev/null || true")
 
-            run_cmd(
-                f"chroot {tgt} apt-get remove -y "
-                f"live-boot live-boot-initramfs-tools "
-                f"2>/dev/null || true")
+            # ── Step 9: DNS + apt ─────────────────────────────
+            self._prog(77, "[9/12] DNS + apt...")
+            self._log("[9/12] Configuring network...")
+            shutil.copy('/etc/resolv.conf', f"{mnt}/etc/resolv.conf")
+            with open(f"{mnt}/etc/apt/sources.list",'w') as f:
+                f.write(
+                    "deb http://deb.debian.org/debian "
+                    "bookworm main contrib non-free non-free-firmware\n"
+                    "deb http://security.debian.org/debian-security "
+                    "bookworm-security main contrib non-free non-free-firmware\n")
+            sh_log(f"chroot {mnt} apt-get update -qq",
+                   self._log, timeout=120)
+            self._log("  apt: OK")
 
-            # ── Bind mounts (CRITICAL for GRUB) ──────────
-            self._log("  Mounting /dev /proc /sys...")
-            for dd in ['dev', 'dev/pts', 'proc', 'sys']:
-                out, code = run_cmd(
-                    f"mount --bind /{dd} {tgt}/{dd}")
-                self._log(
-                    f"    bind {dd}: "
-                    f"{'OK' if code==0 else out[:60]}")
-
-            # Update initramfs (removes live-boot)
-            self._log("  Updating initramfs...")
-            run_cmd(
-                f"chroot {tgt} update-initramfs "
-                f"-u -k all 2>/dev/null || true", 120)
-            self._log("  initramfs: OK")
-
-            # ── 7. GRUB ─────────────────────────────────
-            # METHOD: debian-installer proven approach
-            # grub-install from LIVE system with --root-directory
-            # This is how ALL Debian-based installers work
-            self._prog(88, "Installing GRUB...")
-            self._log(f"[7/7] GRUB on {disk}...")
-            ru_clean = ru.strip()
-
-            # A: Find exact kernel + initrd
-            kern_out, _ = run_cmd(
-                f"ls {tgt}/boot/vmlinuz-* 2>/dev/null"
-                f" | sort -V | tail -1")
-            init_out, _ = run_cmd(
-                f"ls {tgt}/boot/initrd.img-* 2>/dev/null"
-                f" | sort -V | tail -1")
-            kern_file = os.path.basename(
-                kern_out.strip()) if kern_out.strip() else ""
-            init_file = os.path.basename(
-                init_out.strip()) if init_out.strip() else ""
-            self._log(f"  kernel: {kern_file or 'NOT FOUND'}")
-            self._log(f"  initrd: {init_file or 'NOT FOUND'}")
-
-            # B: Fix /etc/default/grub
-            with open(f"{tgt}/etc/default/grub", 'w') as fh:
-                fh.write(
-                    'GRUB_DEFAULT=0\n'
-                    'GRUB_TIMEOUT=5\n'
-                    'GRUB_DISTRIBUTOR="RIDOS OS"\n'
-                    'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n'
-                    'GRUB_CMDLINE_LINUX=""\n'
-                    'GRUB_DISABLE_OS_PROBER=true\n')
-            self._log("  /etc/default/grub: fixed")
-
-            # C: grub-install FROM LIVE SYSTEM
-            # --root-directory is the correct flag (debian-installer method)
-            # Runs on live system, not inside chroot
-            self._log("  grub-install (live system method)...")
-            out, code = run_cmd(
-                f"grub-install "
-                f"--target=i386-pc "
-                f"--root-directory={tgt} "
-                f"--no-floppy "
-                f"--recheck "
-                f"{disk}", 60)
-            self._log(
-                f"  grub-install: "
-                f"{'OK' if code==0 else out[-200:]}")
-
-            # D: Write grub.cfg with exact filenames
-            # Partition number from root device name
-            import re as _re
-            rn = _re.sub(r'^.*?(\d+)$', r'\1',
-                         os.path.basename(root))
-            rn = rn if rn.isdigit() else '3'
-            dn = '0'  # first disk = hd0
-
-            os.makedirs(f"{tgt}/boot/grub", exist_ok=True)
-            cfg_lines = [
-                'set default=0',
-                'set timeout=5',
-                'insmod part_gpt',
-                'insmod ext2',
-                'insmod gzio',
-                '',
-                f'set root=(hd{dn},gpt{rn})',
-                '',
-            ]
-            if kern_file and init_file:
-                cfg_lines += [
-                    'menuentry "RIDOS OS v1.0 Baghdad" {',
-                    f'  set root=(hd{dn},gpt{rn})',
-                    f'  linux   /boot/{kern_file}'
-                    f' root=UUID={ru_clean} ro quiet splash',
-                    f'  initrd  /boot/{init_file}',
-                    '}',
-                    '',
-                    'menuentry "RIDOS OS (recovery)" {',
-                    f'  set root=(hd{dn},gpt{rn})',
-                    f'  linux   /boot/{kern_file}'
-                    f' root=UUID={ru_clean} ro single',
-                    f'  initrd  /boot/{init_file}',
-                    '}',
-                ]
-            grub_cfg = '\n'.join(cfg_lines) + '\n'
-            with open(f"{tgt}/boot/grub/grub.cfg",'w') as fh:
-                fh.write(grub_cfg)
-            self._log("  grub.cfg written")
-
-            # E: chroot update-grub to finalize
-            out2, _ = run_cmd(
-                f"chroot {tgt} update-grub 2>&1", 60)
-            self._log(f"  update-grub: done")
-
-            # F: Verify and show grub.cfg content
-            cfg_path = f"{tgt}/boot/grub/grub.cfg"
-            if os.path.exists(cfg_path):
-                lines_cfg = open(cfg_path).readlines()
-                self._log(
-                    f"  grub.cfg: {len(lines_cfg)} lines OK")
-                for ln in lines_cfg:
-                    if ('linux ' in ln or
-                            'set root' in ln or
-                            'menuentry' in ln):
-                        self._log(f"    {ln.rstrip()}")
+            # ── Step 10: Install + run GRUB ───────────────────
+            self._prog(78, "[10/12] Installing GRUB...")
+            self._log("[10/12] Installing GRUB...")
+            if efi:
+                self._log("  Installing grub-efi...")
+                sh_log(
+                    f"chroot {mnt} apt-get install -y "
+                    f"grub-efi-amd64 grub-efi-amd64-bin "
+                    f"grub-common grub2-common",
+                    self._log, timeout=300)
+                _, err, rc = sh(
+                    f"chroot {mnt} grub-install "
+                    f"--target=x86_64-efi "
+                    f"--efi-directory=/boot/efi "
+                    f"--bootloader-id=RIDOS "
+                    f"--recheck", 60)
             else:
-                self._log("  ERROR: grub.cfg not found!")
+                self._log("  Installing grub-pc...")
+                sh_log(
+                    f"chroot {mnt} apt-get install -y "
+                    f"grub-pc grub-pc-bin "
+                    f"grub-common grub2-common",
+                    self._log, timeout=300)
+                _, err, rc = sh(
+                    f"chroot {mnt} grub-install "
+                    f"--target=i386-pc "
+                    f"--recheck "
+                    f"{disk}", 60)
+            self._log(f"  grub-install: {'OK' if rc==0 else err[-150:]}")
 
-            # ── Cleanup ───────────────────────────────────
-            self._log("  Unmounting...")
-            for dd in ['sys','proc','dev/pts','dev']:
-                run_cmd(
-                    f"umount {tgt}/{dd} "
-                    f"2>/dev/null || true")
-            run_cmd(
-                f"umount {tgt}/boot/efi "
-                f"2>/dev/null || true")
-            run_cmd(
-                f"umount {tgt} 2>/dev/null || true")
-            run_cmd(
-                f"swapoff {swap} 2>/dev/null || true")
+            # ── Step 11: grub.cfg ─────────────────────────────
+            self._prog(85, "[11/12] grub.cfg...")
+            self._log("[11/12] Generating grub.cfg...")
+            kern_files = sorted(glob.glob(f"{mnt}/boot/vmlinuz-*"))
+            init_files = sorted(glob.glob(f"{mnt}/boot/initrd.img-*"))
+            if not kern_files:
+                raise Exception("No kernel in /boot!")
+            kern_name = os.path.basename(kern_files[-1])
+            init_name = os.path.basename(init_files[-1]) \
+                if init_files else f"initrd.img-{kern_name[8:]}"
+            kern_path = f"/boot/{kern_name}"
+            init_path = f"/boot/{init_name}"
+            self._log(f"  kernel: {kern_name}")
+            self._log(f"  initrd: {init_name}")
+            # symlinks
+            sh(f"ln -sf {kern_path} {mnt}/vmlinuz 2>/dev/null || true")
+            sh(f"ln -sf {init_path} {mnt}/initrd.img 2>/dev/null || true")
+            # run update-grub
+            sh_log(f"chroot {mnt} update-grub", self._log, timeout=60)
+            # verify kernel name in grub.cfg
+            cfg = f"{mnt}/boot/grub/grub.cfg"
+            needs_rewrite = True
+            if os.path.exists(cfg):
+                content = open(cfg).read()
+                if kern_name in content:
+                    needs_rewrite = False
+                    self._log("  grub.cfg: OK")
+                else:
+                    self._log("  grub.cfg missing kernel name, rewriting...")
+            if needs_rewrite:
+                write_minimal_grub_cfg(mnt, root_uuid, kern_path, init_path)
+                self._log("  grub.cfg: rewritten with exact kernel name")
+            # show key lines
+            if os.path.exists(cfg):
+                for line in open(cfg):
+                    if 'linux ' in line or 'menuentry' in line:
+                        self._log(f"    {line.rstrip()}")
+
+            # ── Step 12: Cleanup ──────────────────────────────
+            self._prog(97, "[12/12] Cleaning up...")
+            self._log("[12/12] Unmounting...")
+            for sub in ['dev/pts','dev','proc','sys','run']:
+                sh(f"umount -l {mnt}/{sub} 2>/dev/null || true")
+            if efi_p:
+                sh(f"umount -l {mnt}/boot/efi 2>/dev/null || true")
+            sh(f"umount -l {mnt} 2>/dev/null || true")
+            sh(f"swapoff {swap_p} 2>/dev/null || true")
+            self._log("  OK")
 
             self._prog(100, "Installation complete!")
-            self._log(
-                "\n" + "="*40 +
-                "\nRIDOS OS installed successfully!\n" +
-                f"Username: {user}\n"
-                f"Password: {pwd}\n\n"
-                "Remove USB and reboot!\n" +
-                "="*40)
-            self.root.after(0, self._show_done, user, pwd)
+            self._log("\n" + "="*45 +
+                      "\nRIDOS OS installed successfully!" +
+                      f"\n  Username: {user}" +
+                      f"\n  Password: {pw}" +
+                      "\n  Remove USB and reboot!" +
+                      "\n" + "="*45)
+            self.root.after(0, self._done, user, pw)
 
         except Exception as e:
             self._log(f"\nFATAL ERROR: {e}")
             self._prog(0, f"FAILED: {e}")
-            # Cleanup on failure
-            try:
-                for dd in ['sys','proc','dev/pts','dev']:
-                    run_cmd(f"umount {tgt}/{dd} "
-                            f"2>/dev/null || true")
-                run_cmd(f"umount {tgt}/boot/efi "
-                        f"2>/dev/null || true")
-                run_cmd(f"umount {tgt} "
-                        f"2>/dev/null || true")
-            except:
-                pass
+            for sub in ['dev/pts','dev','proc','sys','run']:
+                sh(f"umount -l {mnt}/{sub} 2>/dev/null || true")
+            sh(f"umount -l {mnt}/boot/efi 2>/dev/null || true")
+            sh(f"umount -l {mnt} 2>/dev/null || true")
             self.root.after(0, messagebox.showerror,
                             "Installation Failed", str(e))
 
-    def _show_done(self, user, pwd):
-        for w in self.content.winfo_children():
-            w.destroy()
+    def _done(self, user, pw):
+        for w in self.content.winfo_children(): w.destroy()
         f = tk.Frame(self.content, bg=BG)
         f.pack(fill='both', expand=True)
         tk.Label(f, text="✓ Installation Complete!",
-                 font=('Arial', 20, 'bold'),
-                 bg=BG, fg=GREEN).pack(pady=40)
-        tk.Label(
-            f,
-            text=f"Username: {user}\n"
-                 f"Password: {pwd}\n\n"
-                 "Remove USB and reboot.",
-            font=('Arial', 12),
-            bg=BG, fg=TEXT,
-            justify='center').pack()
-        self._btn(f, "Reboot Now",
-                  lambda: run_cmd("reboot"),
-                  GREEN).pack(pady=20)
-        self._btn(f, "Close", self.root.destroy,
-                  BG3).pack()
+                 font=('Arial',22,'bold'), bg=BG, fg=GREEN).pack(pady=40)
+        tk.Label(f,
+                 text=f"Username: {user}\nPassword: {pw}\n\n"
+                      "Remove USB and reboot.",
+                 font=('Arial',13), bg=BG, fg=TEXT,
+                 justify='center').pack()
+        self._btn(f,"Reboot Now", lambda: sh("reboot"), GREEN).pack(pady=20)
+        self._btn(f,"Close", self.root.destroy, BG3).pack()
 
-    # ═══════════════════════════════════════════════════════════
-    # PAGE: About
-    # ═══════════════════════════════════════════════════════════
+    # ─── ABOUT ────────────────────────────────────────────────
     def _page_about(self):
         f = tk.Frame(self.content, bg=BG)
         f.pack(fill='both', expand=True, padx=24, pady=24)
         tk.Label(f, text="RIDOS OS v1.0 Baghdad",
-                 font=('Arial', 20, 'bold'),
-                 bg=BG, fg=PURPLE).pack(pady=(20, 8))
-        tk.Label(
-            f,
-            text="AI-Powered Linux for IT & "
-                 "Communications Professionals\n\n"
-                 "Disk Manager + OS Installer\n"
-                 "Python 3 + Tkinter — No Calamares\n\n"
-                 "Features:\n"
-                 "  • Create / Delete / Format partitions\n"
-                 "  • Resize partitions (EXT4, XFS)\n"
-                 "  • Set boot / active flags\n"
-                 "  • Full OS installation with GRUB\n\n"
-                 "License: GPL v3\n"
-                 "github.com/alkinanireyad/RIDOS-OS",
-            font=('Arial', 11),
-            bg=BG, fg=TEXT,
-            justify='center').pack(pady=12)
+                 font=('Arial',20,'bold'), bg=BG, fg=PURPLE).pack(pady=(20,8))
+        tk.Label(f,
+                 text="AI-Powered Linux for IT & Communications\n\n"
+                      "Installer v1.0 Baghdad\n"
+                      "Disk Manager + OS Installer — BIOS/MBR + UEFI/GPT\n\n"
+                      "License: GPL v3\n"
+                      "github.com/alkinanireyad/RIDOS-OS",
+                 font=('Arial',11), bg=BG, fg=TEXT,
+                 justify='center').pack(pady=12)
 
     def run(self):
         self.root.mainloop()
