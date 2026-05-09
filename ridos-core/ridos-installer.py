@@ -833,26 +833,20 @@ class RIDOSInstaller:
             self._log(f"  Found: {sq}")
             sh(f"chmod 644 {sq} 2>/dev/null || true")
 
-            # unsquashfs to temp then rsync
-            tmp_sq = "/tmp/sq_extract"
+            # Mount squashfs directly - no extraction needed
+            # This avoids filling /tmp on live USB
+            tmp_sq = "/mnt/ridos_squashfs"
+            sh(f"umount -l {tmp_sq} 2>/dev/null || true")
             sh(f"rm -rf {tmp_sq}")
             sh(f"mkdir -p {tmp_sq}")
-            self._prog(18, "[6/12] Extracting squashfs...")
-            self._log("  Extracting squashfs...")
-            rc2 = sh_log(
-                f"unsquashfs -f -d {tmp_sq} {sq}",
-                self._log, timeout=1800)
-
-            # unsquashfs creates squashfs-root/ inside tmp_sq
-            src = f"{tmp_sq}/squashfs-root"
-            if not os.path.exists(src):
-                self._log("  Mounting squashfs (fallback)...")
-                sh(f"rm -rf {tmp_sq}"); sh(f"mkdir -p {tmp_sq}")
-                _, err, rc3 = sh(
-                    f"mount -t squashfs -o loop,ro {sq} {tmp_sq}")
-                if rc3 != 0:
-                    raise Exception(f"Cannot mount squashfs: {err}")
-                src = tmp_sq
+            self._prog(18, "[6/12] Mounting squashfs...")
+            self._log("  Mounting squashfs directly...")
+            _, err, rc3 = sh(
+                f"mount -t squashfs -o loop,ro {sq} {tmp_sq}")
+            if rc3 != 0:
+                raise Exception(f"Cannot mount squashfs: {err}")
+            src = tmp_sq
+            self._log(f"  Squashfs mounted at {tmp_sq}: OK")
 
             self._prog(25, "[6/12] Copying files (10-20 min)...")
             self._log("  Copying files to disk...")
@@ -864,8 +858,8 @@ class RIDOSInstaller:
                 f"--exclude=/media --exclude=/lost+found "
                 f"{src}/ {mnt}/",
                 self._log, timeout=1800)
-            sh(f"umount {tmp_sq} 2>/dev/null || true")
-            sh(f"rm -rf {tmp_sq} 2>/dev/null || true")
+            sh(f"umount -l {tmp_sq} 2>/dev/null || true")
+            sh(f"rmdir {tmp_sq} 2>/dev/null || true")
             if rc4 != 0:
                 raise Exception(f"rsync failed (exit {rc4})")
             self._log("  Files copied: OK")
@@ -902,11 +896,10 @@ class RIDOSInstaller:
             sh(f"chroot {mnt} userdel -r {user} 2>/dev/null || true")
             sh(f"chroot {mnt} useradd -m -s /bin/bash "
                f"-G sudo,audio,video,netdev,plugdev {user}")
-            p = subprocess.Popen(
-                f"chroot {mnt} chpasswd",
-                shell=True, stdin=subprocess.PIPE)
-            p.communicate(
-                input=f"{user}:{pw}\nroot:{pw}\n".encode())
+            # Use sh() for chpasswd - avoids encode() issue
+            pw_input = f"{user}:{pw}\nroot:{pw}\n"
+            sh(f"echo '{user}:{pw}' | chroot {mnt} chpasswd")
+            sh(f"echo 'root:{pw}' | chroot {mnt} chpasswd")
             self._log(f"  User '{user}': OK")
             # disable live autologin
             for fp in [f"{mnt}/etc/lightdm/lightdm.conf.d/50-ridos.conf",
@@ -923,6 +916,12 @@ class RIDOSInstaller:
             # ── Step 9: DNS + apt ─────────────────────────────
             self._prog(77, "[9/12] DNS + apt...")
             self._log("[9/12] Configuring network...")
+            # Create /tmp inside chroot with correct permissions
+            # apt fails if /tmp is missing or has wrong permissions
+            sh(f"mkdir -p {mnt}/tmp")
+            sh(f"chmod 1777 {mnt}/tmp")
+            sh(f"mkdir -p {mnt}/var/tmp")
+            sh(f"chmod 1777 {mnt}/var/tmp")
             shutil.copy('/etc/resolv.conf', f"{mnt}/etc/resolv.conf")
             with open(f"{mnt}/etc/apt/sources.list",'w') as f:
                 f.write(
