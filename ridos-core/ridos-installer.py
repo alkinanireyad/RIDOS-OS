@@ -51,9 +51,15 @@ MNT = "/mnt/ridos_target"
 # ════════════════════════════════════════════════════════════════
 
 def sh(cmd, inp=None, timeout=600):
-    r = subprocess.run(cmd, shell=True, capture_output=True,
-                       text=True, timeout=timeout, input=inp)
-    return r.stdout.strip(), r.stderr.strip(), r.returncode
+    # Ensure inp is string or None - never int
+    if inp is not None and not isinstance(inp, (str, bytes)):
+        inp = str(inp)
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True,
+                           text=True, timeout=timeout, input=inp)
+        return r.stdout.strip(), r.stderr.strip(), r.returncode
+    except Exception as e:
+        return '', str(e), 1
 
 def sh_log(cmd, log_fn, timeout=3600):
     p = subprocess.Popen(cmd, shell=True,
@@ -896,8 +902,6 @@ class RIDOSInstaller:
             sh(f"chroot {mnt} userdel -r {user} 2>/dev/null || true")
             sh(f"chroot {mnt} useradd -m -s /bin/bash "
                f"-G sudo,audio,video,netdev,plugdev {user}")
-            # Use sh() for chpasswd - avoids encode() issue
-            pw_input = f"{user}:{pw}\nroot:{pw}\n"
             sh(f"echo '{user}:{pw}' | chroot {mnt} chpasswd")
             sh(f"echo 'root:{pw}' | chroot {mnt} chpasswd")
             self._log(f"  User '{user}': OK")
@@ -948,7 +952,7 @@ class RIDOSInstaller:
                     f"--target=x86_64-efi "
                     f"--efi-directory=/boot/efi "
                     f"--bootloader-id=RIDOS "
-                    f"--recheck", 60)
+                    f"--recheck", timeout=60)
             else:
                 self._log("  Installing grub-pc...")
                 sh_log(
@@ -960,7 +964,7 @@ class RIDOSInstaller:
                     f"chroot {mnt} grub-install "
                     f"--target=i386-pc "
                     f"--recheck "
-                    f"{disk}", 60)
+                    f"{disk}", timeout=60)
             self._log(f"  grub-install: {'OK' if rc==0 else err[-150:]}")
 
             # ── Step 11: grub.cfg ─────────────────────────────
