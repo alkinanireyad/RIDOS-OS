@@ -870,6 +870,27 @@ class RIDOSInstaller:
                 raise Exception(f"rsync failed (exit {rc4})")
             self._log("  Files copied: OK")
 
+            # Check if /boot has kernel - if not, copy from live system
+            self._log("  Checking /boot...")
+            kern_check = glob.glob(f"{mnt}/boot/vmlinuz-*")
+            if not kern_check:
+                self._log("  /boot empty - copying kernel from live system...")
+                sh(f"mkdir -p {mnt}/boot")
+                # Copy kernel and initrd from live system
+                sh(f"cp /boot/vmlinuz-* {mnt}/boot/ 2>/dev/null || true")
+                sh(f"cp /boot/initrd.img-* {mnt}/boot/ 2>/dev/null || true")
+                sh(f"cp /boot/config-* {mnt}/boot/ 2>/dev/null || true")
+                sh(f"cp /boot/System.map-* {mnt}/boot/ 2>/dev/null || true")
+                # Copy kernel modules too
+                sh(f"cp -a /lib/modules/* {mnt}/lib/modules/ 2>/dev/null || true")
+                kern_check2 = glob.glob(f"{mnt}/boot/vmlinuz-*")
+                if kern_check2:
+                    self._log(f"  Kernel copied: {os.path.basename(kern_check2[-1])}")
+                else:
+                    raise Exception("/boot still empty after copy from live system!")
+            else:
+                self._log(f"  Kernel found: {os.path.basename(kern_check[-1])}")
+
             # ── Step 7: Bind mounts AFTER rsync ───────────────
             self._prog(65, "[7/12] Bind mounts...")
             self._log("[7/12] Binding system dirs (after rsync)...")
