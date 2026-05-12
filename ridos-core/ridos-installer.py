@@ -887,7 +887,33 @@ class RIDOSInstaller:
                 if kern_check2:
                     self._log(f"  Kernel copied: {os.path.basename(kern_check2[-1])}")
                 else:
-                    raise Exception("/boot still empty after copy from live system!")
+                    # Try finding kernel in squashfs mount or ISO
+                    self._log("  Searching for kernel in all locations...")
+                    search_out, _, _ = sh(
+                        "find /run/live /lib/live /boot /mnt/ridos_squashfs "
+                        "-name 'vmlinuz-*' 2>/dev/null | head -5")
+                    self._log(f"  Found: {search_out}")
+                    # Copy from squashfs mount directly
+                    sh(f"find /mnt/ridos_squashfs -name 'vmlinuz-*' "
+                       f"-exec cp {{}} {mnt}/boot/ \\; 2>/dev/null || true")
+                    sh(f"find /mnt/ridos_squashfs -name 'initrd.img-*' "
+                       f"-exec cp {{}} {mnt}/boot/ \\; 2>/dev/null || true")
+                    # Also try from iso/live/
+                    sh(f"cp /run/live/medium/live/vmlinuz {mnt}/boot/ 2>/dev/null || true")
+                    sh(f"cp /run/live/medium/live/initrd {mnt}/boot/ 2>/dev/null || true")
+                    kern_check3 = glob.glob(f"{mnt}/boot/vmlinuz-*")
+                    if not kern_check3:
+                        # Last resort: copy from squashfs /boot dir
+                        sh(f"ls /mnt/ridos_squashfs/boot/ 2>/dev/null",)
+                        sh(f"cp -a /mnt/ridos_squashfs/boot/. {mnt}/boot/ 2>/dev/null || true")
+                        kern_check3 = glob.glob(f"{mnt}/boot/vmlinuz-*")
+                    if kern_check3:
+                        self._log(f"  Kernel found: {os.path.basename(kern_check3[-1])}")
+                    else:
+                        self._log(f"  Search results: {search_out}")
+                        raise Exception(
+                            "No kernel found anywhere!\n"
+                            "Check: find /run/live -name 'vmlinuz-*'")
             else:
                 self._log(f"  Kernel found: {os.path.basename(kern_check[-1])}")
 
